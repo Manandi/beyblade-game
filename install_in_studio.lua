@@ -840,8 +840,64 @@ local camera = Workspace.CurrentCamera
 local slamRemote = ReplicatedStorage:WaitForChild("BeyRemotes"):WaitForChild("Slam")
 local beysFolder = Workspace:WaitForChild("Beys")
 
--- Roblox's own control module gives one move vector for keyboard, thumbstick and gamepad.
-local controls = require(player:WaitForChild("PlayerScripts"):WaitForChild("PlayerModule")):GetControls()
+-- Move input. Roblox's control module gives one vector for keyboard, thumbstick and gamepad, but it may be
+-- missing or slow, so we never block on it: until it loads (or if it never does) our own reader below is used.
+local controls = nil
+task.spawn(function()
+	local module = player:WaitForChild("PlayerScripts"):WaitForChild("PlayerModule", 10)
+	if module then
+		local ok, result = pcall(function()
+			return require(module):GetControls()
+		end)
+		if ok then
+			controls = result
+		end
+	end
+end)
+
+-- Fallback touch stick: a drag that starts on the left half of the screen moves the bey.
+local touchStick = { input = nil, origin = Vector2.zero, vec = Vector2.zero }
+UserInputService.TouchStarted:Connect(function(touch, processed)
+	if processed or touchStick.input or touch.Position.X > camera.ViewportSize.X * 0.5 then
+		return
+	end
+	touchStick.input = touch
+	touchStick.origin = Vector2.new(touch.Position.X, touch.Position.Y)
+end)
+UserInputService.TouchMoved:Connect(function(touch)
+	if touch == touchStick.input then
+		local d = (Vector2.new(touch.Position.X, touch.Position.Y) - touchStick.origin) / 60
+		touchStick.vec = d.Magnitude > 1 and d.Unit or d
+	end
+end)
+UserInputService.TouchEnded:Connect(function(touch)
+	if touch == touchStick.input then
+		touchStick.input = nil
+		touchStick.vec = Vector2.zero
+	end
+end)
+
+local function getMoveVector() -- x = right, z = back
+	if controls then
+		return controls:GetMoveVector()
+	end
+	local x, z = 0, 0
+	if not UserInputService:GetFocusedTextBox() then
+		local K = Enum.KeyCode
+		x = (UserInputService:IsKeyDown(K.D) and 1 or 0) - (UserInputService:IsKeyDown(K.A) and 1 or 0)
+		z = (UserInputService:IsKeyDown(K.S) and 1 or 0) - (UserInputService:IsKeyDown(K.W) and 1 or 0)
+	end
+	for _, state in ipairs(UserInputService:GetGamepadState(Enum.UserInputType.Gamepad1)) do
+		if state.KeyCode == Enum.KeyCode.Thumbstick1 and state.Position.Magnitude > 0.15 then
+			x = x + state.Position.X
+			z = z - state.Position.Y
+		end
+	end
+	x = x + touchStick.vec.X
+	z = z + touchStick.vec.Y
+	local v = Vector3.new(x, 0, z)
+	return v.Magnitude > 1 and v.Unit or v
+end
 
 local MAX_TILT = math.rad(M.MaxTiltDeg)
 
@@ -916,7 +972,7 @@ end)
 
 -- Touch drags on the game view (not on the thumbstick or buttons) aim the bey.
 UserInputService.InputChanged:Connect(function(input, processed)
-	if processed or input.UserInputType ~= Enum.UserInputType.Touch then
+	if processed or input.UserInputType ~= Enum.UserInputType.Touch or input == touchStick.input then
 		return
 	end
 	yaw = yaw - input.Delta.X * M.TouchSensitivity
@@ -992,7 +1048,7 @@ local function step(dt)
 
 	local vel = body.AssemblyLinearVelocity
 	local tilt = math.clamp(pitch / MAX_TILT, -1, 1) -- -1 nose down .. +1 nose up
-	local mv = controls:GetMoveVector() -- x = right, z = back
+	local mv = getMoveVector()
 	local yawCF = CFrame.Angles(0, yaw, 0)
 	local wish = yawCF.RightVector * mv.X + yawCF.LookVector * -mv.Z
 	if wish.Magnitude > 1 then
@@ -1082,7 +1138,7 @@ local function step(dt)
 	end
 
 	readout.Text = string.format(
-		"TILT %+3d deg   SPEED %3d\n%s\nATK %.1f DEF %.1f STA %.1f BAL %.1f",
+		"TILT %+.0f deg   SPEED %.0f\n%s\nATK %.1f DEF %.1f STA %.1f BAL %.1f",
 		math.deg(pitch),
 		Vector3.new(vel.X, 0, vel.Z).Magnitude,
 		slamming and "SLAMMING" or (grounded and "GROUND" or "AIR"),

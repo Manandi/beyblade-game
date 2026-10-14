@@ -51,6 +51,13 @@ This repo started inside the owner's `Manandi/god` repo (the Hollow Roots game) 
    Run up the orange ramp with the mouse pushed forward (nose up) to launch; click in the air to slam the red dummies.
    R resets.
 
+### Playtest log
+
+- **2026-10-14, first Studio run:** the installer worked, and the stadium (floor, ramp, dummies) and the bey with its design
+  built correctly. The controller then blocked forever on `PlayerModule:WaitForChild` (line 23), so there was no movement or camera.
+  Fixed: it no longer waits on it; it uses `PlayerModule` if it loads within 10 s and otherwise its own keyboard, gamepad and touch-stick reader.
+  Movement, tilt, launch and slam are still unverified.
+
 ### Status: untested in Studio
 
 Nothing here has run in Roblox. It was syntax-checked with `luau-analyze` (only Roblox-type "unknown" messages),
