@@ -76,6 +76,10 @@ This repo started inside the owner's `Manandi/god` repo (the Hollow Roots game) 
   metal wheels with weight holes; faceted drivers). Previews are Cycles renders. Hiring a 3D artist for hero beys remains
   the route to top quality; their meshes drop into the same import system.
 
+- **2026-10-14, first mesh import:** the meshes imported lying flat (orientation looks right) but stayed in Workspace,
+  so the bey kept its block shapes and the parts littered the stadium. Fixed: BeySpawner moves any imported bey
+  meshes from Workspace into ReplicatedStorage.BeyMeshes at start.
+
 ### Status: untested in Studio
 
 Nothing here has run in Roblox. It was syntax-checked with `luau-analyze` (only Roblox-type "unknown" messages),

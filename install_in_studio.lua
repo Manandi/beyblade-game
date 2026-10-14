@@ -838,6 +838,36 @@ local BeyConfig = require(ReplicatedStorage:WaitForChild("BeyConfig"))
 local BeyVisuals = require(ReplicatedStorage:WaitForChild("BeyVisuals"))
 local M = BeyConfig.Movement
 
+-- Studio's 3D importer puts imported models in Workspace. Move any bey meshes found there into
+-- ReplicatedStorage.BeyMeshes, where BeyVisuals looks for them (and so they don't litter the stadium).
+do
+	local BeyMeshData = require(ReplicatedStorage:WaitForChild("BeyMeshData"))
+	local meshFolder = ReplicatedStorage:FindFirstChild("BeyMeshes")
+	if not meshFolder then
+		meshFolder = Instance.new("Folder")
+		meshFolder.Name = "BeyMeshes"
+		meshFolder.Parent = ReplicatedStorage
+	end
+	local imported = {}
+	for _, d in ipairs(Workspace:GetDescendants()) do
+		if d:IsA("MeshPart") and BeyMeshData[d.Name] then
+			local top = d
+			while top.Parent and top.Parent ~= Workspace do
+				top = top.Parent
+			end
+			imported[top] = true
+		end
+	end
+	local count = 0
+	for top in pairs(imported) do
+		top.Parent = meshFolder
+		count = count + 1
+	end
+	if count > 0 then
+		print(("Spinforge: moved %d imported bey mesh model(s) from Workspace into ReplicatedStorage.BeyMeshes"):format(count))
+	end
+end
+
 local remotes = Instance.new("Folder")
 remotes.Name = "BeyRemotes"
 remotes.Parent = ReplicatedStorage

@@ -25,7 +25,8 @@ using simple block shapes. To get the real models:
 1. Download the three files in [`assets/meshes/`](assets/meshes/): `layers.fbx`, `discs.fbx` and `drivers.fbx`
    (open each on GitHub and click **Download raw file**).
 2. In Studio, click **Import** (Home tab) or **File > Import 3D**, pick `layers.fbx`, and click **Import** with the default options.
-3. A model named `layers` appears in the Explorer (in Workspace). Drag it into **ReplicatedStorage > BeyMeshes**.
+3. A model named `layers` appears in the stadium area (Workspace). You can leave it there: when you press Play the game moves it
+   into **ReplicatedStorage > BeyMeshes** by itself. To keep the edit view tidy, drag it there yourself.
 4. Repeat for `discs.fbx` and `drivers.fbx`, then press **Play**.
 
 Save the place (File > Save) so you don't have to import again. Re-running the installer keeps the BeyMeshes folder.
