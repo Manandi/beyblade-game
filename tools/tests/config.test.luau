@@ -1,4 +1,7 @@
--- Appended after the stubs and BeyConfig by run_tests.sh.
+-- BeyConfig data checks: odds, simulated rolls, budgets, designs and mesh data.
+--@use src/shared/BeyConfig.lua BeyConfig
+--@use src/shared/BeyMeshData.lua BeyMeshData
+--@use src/shared/BeyDesigns.lua BeyDesigns
 print("BeyConfig loaded; parts:", (function() local n = 0 for _ in pairs(BeyConfig.Parts) do n += 1 end return n end)())
 
 for boxId in pairs(BeyConfig.Boxes) do
@@ -76,4 +79,4 @@ for id in pairs(BeyConfig.Parts) do
 	end
 end
 print("mesh data OK for all parts")
-print("ALL OK")
+print("TESTS PASSED")
