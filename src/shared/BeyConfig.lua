@@ -172,6 +172,7 @@ BeyConfig.Movement = {
 	CameraDistance = 22,
 	CameraHeight = 2,
 	CameraBasePitch = 0.28, -- radians the camera looks down by default
+	CameraMinPitch = 0.06, -- the camera never drops below the bey (this was what broke it at high tilt)
 	MouseSensitivity = 0.0028, -- radians per pixel
 	TouchSensitivity = 0.0045,
 }

@@ -12,6 +12,9 @@
       },
       "BeyVisuals": {
         "$path": "src/shared/BeyVisuals.lua"
+      },
+      "BeyMeshData": {
+        "$path": "src/shared/BeyMeshData.lua"
       }
     },
     "ServerScriptService": {

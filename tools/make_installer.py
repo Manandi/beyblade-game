@@ -7,6 +7,7 @@ files = [  # (path, class, service, name)
     ("src/shared/BeyConfig.lua", "ModuleScript", "ReplicatedStorage", "BeyConfig"),
     ("src/shared/BeyDesigns.lua", "ModuleScript", "ReplicatedStorage", "BeyDesigns"),
     ("src/shared/BeyVisuals.lua", "ModuleScript", "ReplicatedStorage", "BeyVisuals"),
+    ("src/shared/BeyMeshData.lua", "ModuleScript", "ReplicatedStorage", "BeyMeshData"),
     ("src/server/StadiumBuilder.server.lua", "Script", "ServerScriptService", "StadiumBuilder"),
     ("src/server/BeySpawner.server.lua", "Script", "ServerScriptService", "BeySpawner"),
     ("src/client/BeyController.client.lua", "LocalScript", "StarterPlayerScripts", "BeyController"),
@@ -25,11 +26,14 @@ out = ["-- Paste this whole file into Studio's Command Bar (View > Command Bar) 
        "\ts.Name = name",
        "\ts.Source = source",
        "\ts.Parent = parent",
-       "end", ""]
+       "end",
+       "-- Where the imported bey meshes go (kept between installs).",
+       "if not RS:FindFirstChild('BeyMeshes') then local f = Instance.new('Folder') f.Name = 'BeyMeshes' f.Parent = RS end",
+       ""]
 for path, cls, svc, name in files:
     src = open(os.path.join(root, path)).read()
     assert "]=====]" not in src
     out.append(f"install('{cls}', '{svc}', '{name}', [=====[\n{src}]=====])")
-out.append("print('Spinforge installed: ' .. #" + str(len(files)) + " .. ' scripts. Press Play.')".replace("#" + str(len(files)) + " .. ' scripts", str(len(files)) + " .. ' scripts") if False else "print('Spinforge installed (" + str(len(files)) + " scripts). Press Play.')")
+out.append("print('Spinforge installed (" + str(len(files)) + " scripts). Press Play.')")
 open(os.path.join(root, "install_in_studio.lua"), "w").write("\n".join(out) + "\n")
 print("wrote install_in_studio.lua")

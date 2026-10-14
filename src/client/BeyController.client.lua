@@ -94,6 +94,25 @@ local rayParams = RaycastParams.new()
 rayParams.FilterType = Enum.RaycastFilterType.Exclude
 rayParams.FilterDescendantsInstances = { beysFolder }
 
+-- The camera also ignores the stadium's invisible fence and the parked avatar.
+local cameraRayParams = RaycastParams.new()
+cameraRayParams.FilterType = Enum.RaycastFilterType.Exclude
+local function refreshCameraFilter()
+	local ignore = { beysFolder }
+	if player.Character then
+		table.insert(ignore, player.Character)
+	end
+	local stadium = Workspace:FindFirstChild("Stadium")
+	local fence = stadium and stadium:FindFirstChild("Barrier")
+	if fence then
+		table.insert(ignore, fence)
+	end
+	cameraRayParams.FilterDescendantsInstances = ignore
+end
+refreshCameraFilter()
+player.CharacterAdded:Connect(refreshCameraFilter)
+Workspace.ChildAdded:Connect(refreshCameraFilter)
+
 ----------------------------------------------------------------------- HUD
 
 local gui = Instance.new("ScreenGui")
@@ -352,11 +371,15 @@ RunService:BindToRenderStep("BeyCamera", Enum.RenderPriority.Camera.Value + 1, f
 	local target = body.Position + Vector3.new(0, M.CameraHeight, 0)
 	focus = focus and focus:Lerp(target, 1 - math.exp(-22 * dt)) or target
 	-- Nose up lowers the camera so you look along the flight path; nose down lifts it.
-	local camPitch = math.clamp(M.CameraBasePitch - pitch * 0.8, -0.3, 1.1)
-	camera.CFrame = CFrame.new(focus)
-		* CFrame.Angles(0, yaw, 0)
-		* CFrame.Angles(-camPitch, 0, 0)
-		* CFrame.new(0, 0, M.CameraDistance)
+	-- Never below level with the bey, so it can't swing under the floor.
+	local camPitch = math.clamp(M.CameraBasePitch - pitch * 0.8, M.CameraMinPitch, 1.1)
+	local wanted = (CFrame.new(focus) * CFrame.Angles(0, yaw, 0) * CFrame.Angles(-camPitch, 0, 0) * CFrame.new(0, 0, M.CameraDistance)).Position
+	-- Pull the camera in front of any wall or floor between it and the bey.
+	local hit = Workspace:Raycast(focus, wanted - focus, cameraRayParams)
+	if hit then
+		wanted = hit.Position + (focus - hit.Position).Unit * 0.8
+	end
+	camera.CFrame = CFrame.lookAt(wanted, focus)
 end)
 
 ----------------------------------------------------------------------- binding

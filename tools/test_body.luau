@@ -66,4 +66,14 @@ for id, part in pairs(BeyConfig.Parts) do
 	seen[key] = id
 end
 print("designs OK for all parts")
+-- Every part has both Blender meshes recorded (primary + accent), with a sane size, inside the bey's space.
+for id in pairs(BeyConfig.Parts) do
+	for _, suffix in ipairs({ "_P", "_A" }) do
+		local m = BeyMeshData[id .. suffix]
+		assert(m, "no mesh data for " .. id .. suffix .. " (re-run tools/blender/build_beys.py)")
+		assert(m.Size.X > 0 and m.Size.X <= 4.4 and m.Size.Z <= 4.4 and m.Size.Y > 0, id .. suffix .. " has an odd size")
+		assert(math.abs(m.Center.Y) < 1.6, id .. suffix .. " is outside the bey")
+	end
+end
+print("mesh data OK for all parts")
 print("ALL OK")

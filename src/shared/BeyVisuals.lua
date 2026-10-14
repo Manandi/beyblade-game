@@ -1,11 +1,13 @@
 --!nonstrict
--- Builds a bey's looks from its three parts' designs (BeyDesigns) out of basic Roblox parts.
+-- Builds a bey's looks. If the Blender meshes have been imported into ReplicatedStorage.BeyMeshes (see README),
+-- each part uses its mesh; otherwise it falls back to a simple shape built from basic Roblox parts (BeyDesigns).
 -- Everything is welded to the spinning hub, massless and non-colliding, so the physics body is unchanged.
 -- Call BeyVisuals.Attach on the SERVER after the model is parented to Workspace (so welds capture the layout).
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local BeyConfig = require(ReplicatedStorage:WaitForChild("BeyConfig"))
 local BeyDesigns = require(ReplicatedStorage:WaitForChild("BeyDesigns"))
+local BeyMeshData = require(ReplicatedStorage:WaitForChild("BeyMeshData"))
 
 local BeyVisuals = {}
 
@@ -148,9 +150,9 @@ local function buildDriver(ctx, d)
 end
 
 -- Rarity dressing: Epic+ get a glowing trim ring, Legendary+ sparks, Ultra Legendary a light too.
-local function buildRarityEffects(ctx, layerDesign, rarity)
+local function buildRarityEffects(ctx, layerDesign, rarity, meshed)
 	local rank = rarityRank(rarity)
-	if rank >= rarityRank("Epic") then
+	if rank >= rarityRank("Epic") and not meshed then -- the meshes model their own rarity trim
 		addCyl(ctx, 2.6, 0.06, 0.42, layerDesign.Accent, Enum.Material.Neon)
 	end
 	if rank >= rarityRank("Legendary") then
@@ -177,13 +179,68 @@ end
 
 -- hub: the spinning Part the visuals attach to. root: the body's CFrame when the hub was placed.
 -- partIds: { Layer = id, Disc = id, Driver = id }. The highest rarity among the three sets the dressing.
+-- Imported MeshPart named `name` anywhere under ReplicatedStorage.BeyMeshes (the importer may nest them in Models).
+local function findMesh(name)
+	local folder = ReplicatedStorage:FindFirstChild("BeyMeshes")
+	local found = folder and folder:FindFirstChild(name, true)
+	if found and found:IsA("MeshPart") and BeyMeshData[name] then
+		return found
+	end
+	return nil
+end
+
+-- Clones a mesh, resizes it to the size Blender recorded (so the import scale doesn't matter) and welds it on.
+local function addMesh(ctx, template, data, color, material)
+	local p = template:Clone()
+	for _, child in ipairs(p:GetChildren()) do
+		child:Destroy() -- drop anything the importer attached (SurfaceAppearance, welds)
+	end
+	pcall(function()
+		p.TextureID = ""
+	end)
+	p.Anchored = false
+	p.CanCollide = false
+	p.CanQuery = false
+	p.CanTouch = false
+	p.Massless = true
+	p.Color = color
+	p.Material = material
+	p.Size = data.Size
+	p.CFrame = ctx.root * CFrame.new(0, Y_OFFSET, 0) * CFrame.new(data.Center)
+	p.Parent = ctx.parent
+	local weld = Instance.new("WeldConstraint")
+	weld.Part0 = ctx.hub
+	weld.Part1 = p
+	weld.Parent = p
+end
+
+-- Uses the part's two meshes if both are imported; returns false so the caller can fall back.
+local function tryMeshes(ctx, id, slot, design)
+	local primary, accent = findMesh(id .. "_P"), findMesh(id .. "_A")
+	if not (primary and accent) then
+		return false
+	end
+	local rank = rarityRank(BeyConfig.Parts[id].Rarity)
+	local body = slot == "Disc" and Enum.Material.Metal or Enum.Material.SmoothPlastic
+	addMesh(ctx, primary, BeyMeshData[id .. "_P"], design.Primary, body)
+	addMesh(ctx, accent, BeyMeshData[id .. "_A"], design.Accent, rank >= rarityRank("Legendary") and Enum.Material.Neon or Enum.Material.SmoothPlastic)
+	return true
+end
+
 function BeyVisuals.Attach(hub, root, partIds, parent)
 	local ctx = { hub = hub, root = root, parent = parent or hub.Parent }
 	local layer, disc, driver = BeyDesigns.Parts[partIds.Layer], BeyDesigns.Parts[partIds.Disc], BeyDesigns.Parts[partIds.Driver]
 	assert(layer and disc and driver, "missing design for a part")
-	buildDisc(ctx, disc)
-	buildDriver(ctx, driver)
-	buildLayer(ctx, layer)
+	if not tryMeshes(ctx, partIds.Disc, "Disc", disc) then
+		buildDisc(ctx, disc)
+	end
+	if not tryMeshes(ctx, partIds.Driver, "Driver", driver) then
+		buildDriver(ctx, driver)
+	end
+	local layerMeshed = tryMeshes(ctx, partIds.Layer, "Layer", layer)
+	if not layerMeshed then
+		buildLayer(ctx, layer)
+	end
 
 	local best = "Common"
 	for _, slot in ipairs(BeyConfig.Slots) do
@@ -192,7 +249,7 @@ function BeyVisuals.Attach(hub, root, partIds, parent)
 			best = rarity
 		end
 	end
-	buildRarityEffects(ctx, layer, best)
+	buildRarityEffects(ctx, layer, best, layerMeshed)
 end
 
 return BeyVisuals

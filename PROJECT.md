@@ -34,7 +34,8 @@ This repo started inside the owner's `Manandi/god` repo (the Hollow Roots game) 
 | `src/shared/BeyConfig.lua` | 33 original parts (3 slots × 6 rarities), level scaling, movement tuning, two crate odds tables, `RollBox`, `GetDisplayOdds`. Validates at load: odds total exactly 10000 bp, stats match each rarity's budget, Ultra Legendary is +10% of the best Legendary. |
 | `src/shared/BeyDesigns.lua` | Looks of every part, as data: style, blade count, primary and accent colours. |
 | `src/shared/BeyVisuals.lua` | Builds the bey from those designs out of basic parts, welded to the spinning hub: 5 layer styles (Spike, Hook, Blade, Petal, Armor), 4 disc styles, 5 driver styles. Epic+ get a glowing trim ring, Legendary+ sparks, Ultra Legendary a light. |
-| `src/server/StadiumBuilder.server.lua` | Builds a test floor, a 25° ramp and three knockable target dummies if there is no `Stadium` in Workspace. Sets gravity to 140. |
+| `src/server/StadiumBuilder.server.lua` | Builds a round bowl stadium (flat centre, steepening rings, 72° launch lip, invisible fence) and three knockable dummies if there is no `Stadium` in Workspace. Sets gravity to 140. |
+| `tools/blender/build_beys.py` | Models all 33 parts in Blender (runs headless with `pip install bpy`): writes `assets/meshes/*.fbx`, `src/shared/BeyMeshData.lua` and `assets/previews/*.png`. |
 | `src/server/BeySpawner.server.lua` | Builds each player's bey (invisible ball body + hinged spinning disc), gives them network ownership, parks the avatar, and handles the slam hit with basic checks (distance, cooldown, value types). |
 | `src/client/BeyController.client.lua` | Camera-relative movement, jump, mouse/touch/stick tilt, ramp takeoff boost, glide and dive from tilt, dive-slam, scriptable third-person camera, debug HUD, touch SLAM button. |
 | `tools/run_tests.sh` | Runs `BeyConfig` under the plain `luau` CLI: validation, odds, 800k simulated rolls, and a bad-odds rejection. |
@@ -61,6 +62,12 @@ This repo started inside the owner's `Manandi/god` repo (the Hollow Roots game) 
   camera, not the travel direction. Fixed: the nose now points along the travel direction (camera facing when nearly still;
   `NoseMinSpeed`, `NoseTurnRate`), so nose up always means up the way the bey is going.
 
+- **2026-10-14, third run:** owner: physics "pretty solid"; the camera broke at some tilts (it swung under the floor),
+  the bey "looks terrible", and the stadium should be round. Fixed: the camera never drops below the bey and is pulled
+  in front of walls; the stadium is now a bowl (flat centre, rings at 12/26/45 degrees, a 72-degree launch lip, glowing rim,
+  invisible fence above it); every part now has a Blender mesh (`tools/blender/build_beys.py`, previews in
+  `assets/previews/`) imported once by the owner (README). None of this has been seen in Studio yet.
+
 ### Status: untested in Studio
 
 Nothing here has run in Roblox. It was syntax-checked with `luau-analyze` (only Roblox-type "unknown" messages),
@@ -75,10 +82,11 @@ Known first-guess weak spots to look at when playtesting:
 
 ### Designs: where they stand
 
-These are generated in-engine from simple shapes, so they are distinct and readable but not hand-sculpted.
-For truly polished beys the plan is Blender meshes uploaded to Roblox, one mesh per layer/disc/driver, replacing the builder per part
-without changing `BeyDesigns` ids. Do that after the gameplay feel is settled. `tools/run_tests.sh` checks that every part has
-a valid, unique-looking design; it cannot judge how they look, so review them in Studio.
+Every part has a Blender mesh in two pieces (`<id>_P` primary, `<id>_A` accent) that Roblox tints from `BeyDesigns`.
+The owner imports the three FBX files once into ReplicatedStorage.BeyMeshes (README). `BeyVisuals` resizes each MeshPart to
+the size Blender recorded (`BeyMeshData`), so the import scale doesn't matter. **Unverified:** whether Studio's importer keeps
+the orientation; if parts come in rotated, fix the export axes in `build_beys.py` or rotate in `addMesh`. If the meshes are
+missing, the old block-built shapes are used. Check the previews in `assets/previews/` after changing the modelling.
 
 ## Milestones
 

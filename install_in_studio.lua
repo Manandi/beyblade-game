@@ -13,6 +13,8 @@ local function install(class, parentName, name, source)
 	s.Source = source
 	s.Parent = parent
 end
+-- Where the imported bey meshes go (kept between installs).
+if not RS:FindFirstChild('BeyMeshes') then local f = Instance.new('Folder') f.Name = 'BeyMeshes' f.Parent = RS end
 
 install('ModuleScript', 'ReplicatedStorage', 'BeyConfig', [=====[
 --!nonstrict
@@ -189,6 +191,7 @@ BeyConfig.Movement = {
 	CameraDistance = 22,
 	CameraHeight = 2,
 	CameraBasePitch = 0.28, -- radians the camera looks down by default
+	CameraMinPitch = 0.06, -- the camera never drops below the bey (this was what broke it at high tilt)
 	MouseSensitivity = 0.0028, -- radians per pixel
 	TouchSensitivity = 0.0045,
 }
@@ -376,13 +379,15 @@ return BeyDesigns
 ]=====])
 install('ModuleScript', 'ReplicatedStorage', 'BeyVisuals', [=====[
 --!nonstrict
--- Builds a bey's looks from its three parts' designs (BeyDesigns) out of basic Roblox parts.
+-- Builds a bey's looks. If the Blender meshes have been imported into ReplicatedStorage.BeyMeshes (see README),
+-- each part uses its mesh; otherwise it falls back to a simple shape built from basic Roblox parts (BeyDesigns).
 -- Everything is welded to the spinning hub, massless and non-colliding, so the physics body is unchanged.
 -- Call BeyVisuals.Attach on the SERVER after the model is parented to Workspace (so welds capture the layout).
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local BeyConfig = require(ReplicatedStorage:WaitForChild("BeyConfig"))
 local BeyDesigns = require(ReplicatedStorage:WaitForChild("BeyDesigns"))
+local BeyMeshData = require(ReplicatedStorage:WaitForChild("BeyMeshData"))
 
 local BeyVisuals = {}
 
@@ -525,9 +530,9 @@ local function buildDriver(ctx, d)
 end
 
 -- Rarity dressing: Epic+ get a glowing trim ring, Legendary+ sparks, Ultra Legendary a light too.
-local function buildRarityEffects(ctx, layerDesign, rarity)
+local function buildRarityEffects(ctx, layerDesign, rarity, meshed)
 	local rank = rarityRank(rarity)
-	if rank >= rarityRank("Epic") then
+	if rank >= rarityRank("Epic") and not meshed then -- the meshes model their own rarity trim
 		addCyl(ctx, 2.6, 0.06, 0.42, layerDesign.Accent, Enum.Material.Neon)
 	end
 	if rank >= rarityRank("Legendary") then
@@ -554,13 +559,68 @@ end
 
 -- hub: the spinning Part the visuals attach to. root: the body's CFrame when the hub was placed.
 -- partIds: { Layer = id, Disc = id, Driver = id }. The highest rarity among the three sets the dressing.
+-- Imported MeshPart named `name` anywhere under ReplicatedStorage.BeyMeshes (the importer may nest them in Models).
+local function findMesh(name)
+	local folder = ReplicatedStorage:FindFirstChild("BeyMeshes")
+	local found = folder and folder:FindFirstChild(name, true)
+	if found and found:IsA("MeshPart") and BeyMeshData[name] then
+		return found
+	end
+	return nil
+end
+
+-- Clones a mesh, resizes it to the size Blender recorded (so the import scale doesn't matter) and welds it on.
+local function addMesh(ctx, template, data, color, material)
+	local p = template:Clone()
+	for _, child in ipairs(p:GetChildren()) do
+		child:Destroy() -- drop anything the importer attached (SurfaceAppearance, welds)
+	end
+	pcall(function()
+		p.TextureID = ""
+	end)
+	p.Anchored = false
+	p.CanCollide = false
+	p.CanQuery = false
+	p.CanTouch = false
+	p.Massless = true
+	p.Color = color
+	p.Material = material
+	p.Size = data.Size
+	p.CFrame = ctx.root * CFrame.new(0, Y_OFFSET, 0) * CFrame.new(data.Center)
+	p.Parent = ctx.parent
+	local weld = Instance.new("WeldConstraint")
+	weld.Part0 = ctx.hub
+	weld.Part1 = p
+	weld.Parent = p
+end
+
+-- Uses the part's two meshes if both are imported; returns false so the caller can fall back.
+local function tryMeshes(ctx, id, slot, design)
+	local primary, accent = findMesh(id .. "_P"), findMesh(id .. "_A")
+	if not (primary and accent) then
+		return false
+	end
+	local rank = rarityRank(BeyConfig.Parts[id].Rarity)
+	local body = slot == "Disc" and Enum.Material.Metal or Enum.Material.SmoothPlastic
+	addMesh(ctx, primary, BeyMeshData[id .. "_P"], design.Primary, body)
+	addMesh(ctx, accent, BeyMeshData[id .. "_A"], design.Accent, rank >= rarityRank("Legendary") and Enum.Material.Neon or Enum.Material.SmoothPlastic)
+	return true
+end
+
 function BeyVisuals.Attach(hub, root, partIds, parent)
 	local ctx = { hub = hub, root = root, parent = parent or hub.Parent }
 	local layer, disc, driver = BeyDesigns.Parts[partIds.Layer], BeyDesigns.Parts[partIds.Disc], BeyDesigns.Parts[partIds.Driver]
 	assert(layer and disc and driver, "missing design for a part")
-	buildDisc(ctx, disc)
-	buildDriver(ctx, driver)
-	buildLayer(ctx, layer)
+	if not tryMeshes(ctx, partIds.Disc, "Disc", disc) then
+		buildDisc(ctx, disc)
+	end
+	if not tryMeshes(ctx, partIds.Driver, "Driver", driver) then
+		buildDriver(ctx, driver)
+	end
+	local layerMeshed = tryMeshes(ctx, partIds.Layer, "Layer", layer)
+	if not layerMeshed then
+		buildLayer(ctx, layer)
+	end
 
 	local best = "Common"
 	for _, slot in ipairs(BeyConfig.Slots) do
@@ -569,15 +629,91 @@ function BeyVisuals.Attach(hub, root, partIds, parent)
 			best = rarity
 		end
 	end
-	buildRarityEffects(ctx, layer, best)
+	buildRarityEffects(ctx, layer, best, layerMeshed)
 end
 
 return BeyVisuals
 ]=====])
+install('ModuleScript', 'ReplicatedStorage', 'BeyMeshData', [=====[
+--!nonstrict
+-- GENERATED by tools/blender/build_beys.py. Do not edit by hand.
+-- Size and Center of every bey mesh in studs, in Roblox axes, relative to the bey's centre.
+-- BeyVisuals resizes each imported MeshPart to Size and places it at Center, so the import scale does not matter.
+return {
+	layer_cinderlash_P = { Center = Vector3.new(0.0000, 0.6559, -0.0000), Size = Vector3.new(4.1300, 0.4882, 4.1300) },
+	layer_cinderlash_A = { Center = Vector3.new(0.0000, 0.8628, -0.0000), Size = Vector3.new(3.7587, 0.5144, 3.7587) },
+	layer_thornwhirl_P = { Center = Vector3.new(-0.2266, 0.6554, 0.1405), Size = Vector3.new(3.7617, 0.4892, 3.6748) },
+	layer_thornwhirl_A = { Center = Vector3.new(-0.2987, 0.7906, 0.0565), Size = Vector3.new(3.6469, 0.6587, 3.7224) },
+	layer_skyrend_P = { Center = Vector3.new(0.0000, 0.6600, -0.0000), Size = Vector3.new(3.7804, 0.4800, 3.7804) },
+	layer_skyrend_A = { Center = Vector3.new(0.0000, 0.8753, -0.0000), Size = Vector3.new(3.7329, 0.4895, 3.7329) },
+	layer_mossback_P = { Center = Vector3.new(0.0000, 0.6760, -0.0000), Size = Vector3.new(3.9177, 0.6388, 3.9177) },
+	layer_mossback_A = { Center = Vector3.new(0.0000, 1.0100, -0.0000), Size = Vector3.new(3.4590, 0.2200, 3.4590) },
+	layer_ironvane_P = { Center = Vector3.new(0.0468, 0.6600, -0.1531), Size = Vector3.new(3.9627, 0.4800, 3.8585) },
+	layer_ironvane_A = { Center = Vector3.new(0.0814, 0.8100, -0.1095), Size = Vector3.new(3.7457, 0.6200, 3.7188) },
+	layer_stormcleat_P = { Center = Vector3.new(0.0000, 0.6554, -0.0000), Size = Vector3.new(3.4099, 0.4892, 3.4099) },
+	layer_stormcleat_A = { Center = Vector3.new(0.0000, 0.7906, -0.0000), Size = Vector3.new(3.1945, 0.6588, 3.1945) },
+	layer_voidpetal_P = { Center = Vector3.new(-0.0881, 0.6501, -0.0600), Size = Vector3.new(3.9930, 0.4998, 3.9899) },
+	layer_voidpetal_A = { Center = Vector3.new(-0.0898, 0.8100, -0.0863), Size = Vector3.new(3.4426, 0.6200, 3.4460) },
+	layer_sunhammer_P = { Center = Vector3.new(0.0000, 0.7060, -0.0000), Size = Vector3.new(3.9167, 0.8385, 3.7778) },
+	layer_sunhammer_A = { Center = Vector3.new(0.0000, 0.8372, -0.0000), Size = Vector3.new(3.4582, 0.6744, 3.3550) },
+	layer_solsticerend_P = { Center = Vector3.new(0.0000, 0.6600, -0.0000), Size = Vector3.new(3.6863, 0.4800, 4.1805) },
+	layer_solsticerend_A = { Center = Vector3.new(0.0000, 0.8006, -0.0000), Size = Vector3.new(3.6679, 0.6387, 3.9594) },
+	layer_tempesthalo_P = { Center = Vector3.new(0.0000, 0.6501, -0.0000), Size = Vector3.new(3.9753, 0.4998, 4.0237) },
+	layer_tempesthalo_A = { Center = Vector3.new(0.0000, 0.8007, -0.0000), Size = Vector3.new(3.5187, 0.6386, 3.5292) },
+	layer_eclipsesovereign_P = { Center = Vector3.new(0.0000, 0.6559, -0.0000), Size = Vector3.new(3.8808, 0.4883, 4.1516) },
+	layer_eclipsesovereign_A = { Center = Vector3.new(0.0000, 0.8506, -0.0000), Size = Vector3.new(3.6572, 0.7401, 3.7062) },
+	disc_pebbledisc_P = { Center = Vector3.new(0.0000, 0.0000, -0.0000), Size = Vector3.new(3.1000, 0.6800, 3.1000) },
+	disc_pebbledisc_A = { Center = Vector3.new(0.0000, -0.0100, -0.0000), Size = Vector3.new(2.5000, 0.2200, 2.5000) },
+	disc_tinplate_P = { Center = Vector3.new(0.0000, 0.0000, -0.0000), Size = Vector3.new(3.3000, 0.4400, 3.3000) },
+	disc_tinplate_A = { Center = Vector3.new(0.0000, 0.0100, -0.0000), Size = Vector3.new(1.2400, 0.6200, 1.2400) },
+	disc_bulwarkring_P = { Center = Vector3.new(0.0000, 0.0400, -0.0000), Size = Vector3.new(3.1000, 0.7200, 3.1000) },
+	disc_bulwarkring_A = { Center = Vector3.new(0.0000, 0.1400, -0.0000), Size = Vector3.new(3.3200, 0.5200, 3.3200) },
+	disc_driftweight_P = { Center = Vector3.new(0.0000, 0.0400, -0.0000), Size = Vector3.new(4.0000, 0.2800, 4.0000) },
+	disc_driftweight_A = { Center = Vector3.new(0.0000, 0.0000, 0.0000), Size = Vector3.new(3.3551, 0.6000, 3.3551) },
+	disc_granitecore_P = { Center = Vector3.new(0.0000, 0.0400, -0.0000), Size = Vector3.new(3.1000, 0.7200, 3.1000) },
+	disc_granitecore_A = { Center = Vector3.new(0.0000, 0.1400, -0.0000), Size = Vector3.new(3.3200, 0.5200, 3.3200) },
+	disc_hollowanvil_P = { Center = Vector3.new(0.0000, 0.0000, -0.0000), Size = Vector3.new(3.3000, 0.4400, 3.3000) },
+	disc_hollowanvil_A = { Center = Vector3.new(0.0000, 0.0100, -0.0000), Size = Vector3.new(1.2400, 0.6200, 1.2400) },
+	disc_titanballast_P = { Center = Vector3.new(0.0000, 0.0400, -0.0000), Size = Vector3.new(3.1000, 0.7200, 3.1000) },
+	disc_titanballast_A = { Center = Vector3.new(0.0000, 0.1400, -0.0000), Size = Vector3.new(3.3200, 0.5200, 3.3200) },
+	disc_stillwater_P = { Center = Vector3.new(0.0000, 0.0400, -0.0000), Size = Vector3.new(4.0000, 0.2800, 4.0000) },
+	disc_stillwater_A = { Center = Vector3.new(0.0000, 0.0000, -0.0000), Size = Vector3.new(3.5014, 0.6000, 3.5014) },
+	disc_worldrootmass_P = { Center = Vector3.new(0.0000, 0.0400, -0.0000), Size = Vector3.new(3.1000, 0.7200, 3.1000) },
+	disc_worldrootmass_A = { Center = Vector3.new(0.0000, 0.1400, -0.0000), Size = Vector3.new(3.3200, 0.5200, 3.3200) },
+	disc_astralflywheel_P = { Center = Vector3.new(0.0000, 0.0400, -0.0000), Size = Vector3.new(4.0000, 0.2800, 4.0000) },
+	disc_astralflywheel_A = { Center = Vector3.new(0.0000, 0.0000, -0.0000), Size = Vector3.new(3.5531, 0.6000, 3.5531) },
+	disc_singularityplate_P = { Center = Vector3.new(0.0000, 0.0000, -0.0000), Size = Vector3.new(3.1000, 0.6800, 3.1000) },
+	disc_singularityplate_A = { Center = Vector3.new(0.0000, 0.0750, -0.0000), Size = Vector3.new(3.3200, 0.7300, 3.3200) },
+	driver_flatnub_P = { Center = Vector3.new(0.0000, -0.5700, -0.0000), Size = Vector3.new(1.4400, 0.5000, 1.4400) },
+	driver_flatnub_A = { Center = Vector3.new(0.0000, -0.9300, -0.0000), Size = Vector3.new(1.2240, 0.2200, 1.2240) },
+	driver_roundpeg_P = { Center = Vector3.new(0.0000, -0.5300, -0.0000), Size = Vector3.new(0.8305, 0.4200, 0.8305) },
+	driver_roundpeg_A = { Center = Vector3.new(0.0000, -1.0600, -0.0000), Size = Vector3.new(0.8000, 0.8000, 0.8000) },
+	driver_glidepin_P = { Center = Vector3.new(0.0000, -0.5450, -0.0000), Size = Vector3.new(1.1040, 0.4500, 1.1040) },
+	driver_glidepin_A = { Center = Vector3.new(0.0000, -1.0450, -0.0000), Size = Vector3.new(0.3848, 0.5500, 0.3848) },
+	driver_spikegrip_P = { Center = Vector3.new(0.0000, -0.8277, 0.0336), Size = Vector3.new(1.1000, 1.0154, 1.1673) },
+	driver_spikegrip_A = { Center = Vector3.new(0.0000, -1.4248, 0.1451), Size = Vector3.new(1.1165, 0.2316, 0.9857) },
+	driver_needlefoot_P = { Center = Vector3.new(0.0000, -0.5450, -0.0000), Size = Vector3.new(1.1040, 0.4500, 1.1040) },
+	driver_needlefoot_A = { Center = Vector3.new(0.0000, -1.1200, -0.0000), Size = Vector3.new(0.3875, 0.7000, 0.3875) },
+	driver_orbitball_P = { Center = Vector3.new(0.0000, -0.5300, -0.0000), Size = Vector3.new(0.8305, 0.4200, 0.8305) },
+	driver_orbitball_A = { Center = Vector3.new(0.0000, -1.1400, -0.0000), Size = Vector3.new(1.0000, 1.0000, 1.0000) },
+	driver_hoverstud_P = { Center = Vector3.new(0.0000, -0.5700, -0.0000), Size = Vector3.new(1.9000, 0.5000, 1.9000) },
+	driver_hoverstud_A = { Center = Vector3.new(0.0000, -0.9300, -0.0000), Size = Vector3.new(1.6150, 0.2200, 1.6150) },
+	driver_anchorcup_P = { Center = Vector3.new(0.0000, -0.6700, -0.0000), Size = Vector3.new(1.7167, 0.7000, 1.7167) },
+	driver_anchorcup_A = { Center = Vector3.new(0.0000, -0.8300, -0.0000), Size = Vector3.new(1.4800, 0.1000, 1.4800) },
+	driver_zerofrictiontip_P = { Center = Vector3.new(0.0000, -0.5450, -0.0000), Size = Vector3.new(1.1040, 0.4500, 1.1040) },
+	driver_zerofrictiontip_A = { Center = Vector3.new(0.0000, -0.9700, -0.0000), Size = Vector3.new(1.3200, 1.2400, 1.3200) },
+	driver_gyroheart_P = { Center = Vector3.new(0.0000, -0.5300, -0.0000), Size = Vector3.new(0.8305, 0.4200, 0.8305) },
+	driver_gyroheart_A = { Center = Vector3.new(0.0000, -1.0000, -0.0000), Size = Vector3.new(1.2000, 1.2800, 1.2000) },
+	driver_perpetualaxis_P = { Center = Vector3.new(0.0000, -0.5450, -0.0000), Size = Vector3.new(1.1040, 0.4500, 1.1040) },
+	driver_perpetualaxis_A = { Center = Vector3.new(0.0000, -1.0100, -0.0000), Size = Vector3.new(1.3200, 1.3200, 1.3200) },
+}
+]=====])
 install('Script', 'ServerScriptService', 'StadiumBuilder', [=====[
 --!nonstrict
--- Builds the prototype test stadium (floor, launch ramp, target dummies) if the place has none.
--- Replace this with a hand-built map in Studio later; delete the script or name your map "Stadium".
+-- Builds the round test stadium if the place has none: a bowl with a flat centre and walls that get steeper toward
+-- the rim. The steep last ring is the launch ramp: ride up the wall nose-up to fly, then slam back down.
+-- An invisible fence above the rim stops launches from leaving the stadium (ring-outs can come later).
+-- Replace this with a hand-built map in Studio later; name your map "Stadium" and this script does nothing.
 local Workspace = game:GetService("Workspace")
 local CollectionService = game:GetService("CollectionService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -589,52 +725,104 @@ if Workspace:FindFirstChild("Stadium") then
 	return
 end
 
+local SEGMENTS = 48 -- slabs per ring; more = smoother wall
+local FLOOR_RADIUS = 14
+-- { outer radius, slope in degrees, colour } going outward from the flat floor
+local RINGS = {
+	{ 24, 12, Color3.fromRGB(46, 56, 84) },
+	{ 33, 26, Color3.fromRGB(40, 70, 120) },
+	{ 39, 45, Color3.fromRGB(34, 96, 160) },
+	{ 42, 72, Color3.fromRGB(30, 130, 200) }, -- the lip: steep enough to throw you up
+}
+local FENCE_HEIGHT = 60
+
 local stadium = Instance.new("Folder")
 stadium.Name = "Stadium"
 stadium.Parent = Workspace
+local barrier = Instance.new("Folder")
+barrier.Name = "Barrier" -- invisible; the camera ignores it
+barrier.Parent = stadium
 
-local function block(name, size, cframe, color)
+local function block(name, size, cframe, color, material, parent)
 	local p = Instance.new("Part")
 	p.Name = name
 	p.Anchored = true
 	p.Size = size
 	p.CFrame = cframe
 	p.Color = color
-	p.Material = Enum.Material.SmoothPlastic
+	p.Material = material or Enum.Material.SmoothPlastic
 	p.TopSurface = Enum.SurfaceType.Smooth
 	p.BottomSurface = Enum.SurfaceType.Smooth
-	p.Parent = stadium
+	p.Parent = parent or stadium
 	return p
 end
 
--- Floor: top surface at y = 1, 300 x 300 studs.
-block("Floor", Vector3.new(300, 2, 300), CFrame.new(0, 0, -60), Color3.fromRGB(60, 64, 80))
+-- Ground outside the stadium (top at y = 1).
+block("Ground", Vector3.new(400, 2, 400), CFrame.new(0, 0, 0), Color3.fromRGB(70, 74, 86))
 
--- Launch ramp: 40 studs long, rising 25 degrees toward -Z. Low end at z = -15, top near z = -51.
-local angle = math.rad(25)
-local length = 40
-local rise = length / 2 * math.sin(angle)
-local run = length / 2 * math.cos(angle)
-block("Ramp", Vector3.new(24, 1, length), CFrame.new(0, 1 + rise, -15 - run) * CFrame.Angles(angle, 0, 0), Color3.fromRGB(230, 170, 60))
+-- Flat centre floor, a touch above the ground so they don't flicker.
+block(
+	"Floor",
+	Vector3.new(1, FLOOR_RADIUS * 2 + 0.6, FLOOR_RADIUS * 2 + 0.6),
+	CFrame.new(0, 0.52, 0) * CFrame.Angles(0, 0, math.rad(90)),
+	Color3.fromRGB(38, 42, 62)
+).Shape = Enum.PartType.Cylinder
 
--- Target dummies: unanchored discs the slam can knock around. Tagged so the server finds them.
+-- Centre marking.
+local mark = block("CentreMark", Vector3.new(0.1, 6, 6), CFrame.new(0, 1.06, 0) * CFrame.Angles(0, 0, math.rad(90)), Color3.fromRGB(90, 200, 255), Enum.Material.Neon)
+mark.Shape = Enum.PartType.Cylinder
+mark.CanCollide = false
+
+-- Sloped rings: each is SEGMENTS slabs whose top surface rises from the ring's inner edge to its outer edge.
+local height = 1.02 -- top of the floor
+local inner = FLOOR_RADIUS
+for ringIndex, ring in ipairs(RINGS) do
+	local outer, slope, color = ring[1], math.rad(ring[2]), ring[3]
+	local run = outer - inner
+	local rise = run * math.tan(slope)
+	local length = run / math.cos(slope) + 0.4 -- a little overlap with the next ring
+	local width = 2 * outer * math.tan(math.pi / SEGMENTS) + 0.25 -- wide enough to close the gaps at the outer edge
+	local midRadius = (inner + outer) / 2
+	for i = 0, SEGMENTS - 1 do
+		local angle = i * 2 * math.pi / SEGMENTS
+		local cf = CFrame.new(0, height + rise / 2, 0)
+			* CFrame.Angles(0, angle, 0)
+			* CFrame.new(0, 0, -midRadius) -- out along this segment's direction
+			* CFrame.Angles(slope, 0, 0) -- tilt so the outer end is higher
+			* CFrame.new(0, -0.5, 0) -- the top face is the riding surface
+		block("Ring" .. ringIndex, Vector3.new(width, 1, length), cf, color)
+	end
+	height = height + rise
+	inner = outer
+end
+local rimHeight = height
+
+-- Outer skirt (looks), glowing rim, and the invisible fence above it.
+for i = 0, SEGMENTS - 1 do
+	local angle = i * 2 * math.pi / SEGMENTS
+	local width = 2 * (inner + 1) * math.tan(math.pi / SEGMENTS) + 0.3
+	local base = CFrame.Angles(0, angle, 0) * CFrame.new(0, 0, -(inner + 0.6))
+	block("Skirt", Vector3.new(width, rimHeight, 1.2), CFrame.new(0, rimHeight / 2, 0) * base, Color3.fromRGB(24, 28, 40))
+	block("Rim", Vector3.new(width, 0.5, 1.4), CFrame.new(0, rimHeight + 0.25, 0) * base, Color3.fromRGB(120, 220, 255), Enum.Material.Neon)
+	local fence = block("Fence", Vector3.new(width, FENCE_HEIGHT, 1), CFrame.new(0, rimHeight + FENCE_HEIGHT / 2, 0) * base, Color3.new(1, 1, 1), nil, barrier)
+	fence.Transparency = 1
+end
+
+-- Target dummies on the floor: unanchored discs the slam can knock around.
 local function dummy(x, z)
 	local p = Instance.new("Part")
 	p.Name = "Dummy"
 	p.Shape = Enum.PartType.Cylinder
-	p.Size = Vector3.new(2, 7, 7)
-	p.CFrame = CFrame.new(x, 4.5, z) * CFrame.Angles(0, 0, math.rad(90))
+	p.Size = Vector3.new(2, 6, 6)
+	p.CFrame = CFrame.new(x, 4, z) * CFrame.Angles(0, 0, math.rad(90))
 	p.Color = Color3.fromRGB(220, 70, 70)
 	p.Material = Enum.Material.SmoothPlastic
 	p.Parent = stadium
 	CollectionService:AddTag(p, "BeyTarget")
 end
-dummy(-10, -80)
-dummy(10, -80)
-dummy(0, -92)
-
-local pad = block("SpawnPad", Vector3.new(14, 0.4, 14), CFrame.new(0, 1.2, 0), Color3.fromRGB(90, 200, 255))
-pad.CanCollide = false
+dummy(9, 0)
+dummy(-5, 8)
+dummy(-5, -8)
 ]=====])
 install('Script', 'ServerScriptService', 'BeySpawner', [=====[
 --!nonstrict
@@ -746,7 +934,7 @@ local function parkAvatar(character)
 		humanoid.JumpHeight = 0
 	end
 	if root then
-		root.CFrame = CFrame.new(0, 4, 24)
+		root.CFrame = CFrame.new(0, 4, 70) -- outside the stadium
 		root.Anchored = true
 	end
 end
@@ -916,6 +1104,25 @@ local noseYaw = 0 -- which way the bey's nose points: its travel direction, so "
 local rayParams = RaycastParams.new()
 rayParams.FilterType = Enum.RaycastFilterType.Exclude
 rayParams.FilterDescendantsInstances = { beysFolder }
+
+-- The camera also ignores the stadium's invisible fence and the parked avatar.
+local cameraRayParams = RaycastParams.new()
+cameraRayParams.FilterType = Enum.RaycastFilterType.Exclude
+local function refreshCameraFilter()
+	local ignore = { beysFolder }
+	if player.Character then
+		table.insert(ignore, player.Character)
+	end
+	local stadium = Workspace:FindFirstChild("Stadium")
+	local fence = stadium and stadium:FindFirstChild("Barrier")
+	if fence then
+		table.insert(ignore, fence)
+	end
+	cameraRayParams.FilterDescendantsInstances = ignore
+end
+refreshCameraFilter()
+player.CharacterAdded:Connect(refreshCameraFilter)
+Workspace.ChildAdded:Connect(refreshCameraFilter)
 
 ----------------------------------------------------------------------- HUD
 
@@ -1175,11 +1382,15 @@ RunService:BindToRenderStep("BeyCamera", Enum.RenderPriority.Camera.Value + 1, f
 	local target = body.Position + Vector3.new(0, M.CameraHeight, 0)
 	focus = focus and focus:Lerp(target, 1 - math.exp(-22 * dt)) or target
 	-- Nose up lowers the camera so you look along the flight path; nose down lifts it.
-	local camPitch = math.clamp(M.CameraBasePitch - pitch * 0.8, -0.3, 1.1)
-	camera.CFrame = CFrame.new(focus)
-		* CFrame.Angles(0, yaw, 0)
-		* CFrame.Angles(-camPitch, 0, 0)
-		* CFrame.new(0, 0, M.CameraDistance)
+	-- Never below level with the bey, so it can't swing under the floor.
+	local camPitch = math.clamp(M.CameraBasePitch - pitch * 0.8, M.CameraMinPitch, 1.1)
+	local wanted = (CFrame.new(focus) * CFrame.Angles(0, yaw, 0) * CFrame.Angles(-camPitch, 0, 0) * CFrame.new(0, 0, M.CameraDistance)).Position
+	-- Pull the camera in front of any wall or floor between it and the bey.
+	local hit = Workspace:Raycast(focus, wanted - focus, cameraRayParams)
+	if hit then
+		wanted = hit.Position + (focus - hit.Position).Unit * 0.8
+	end
+	camera.CFrame = CFrame.lookAt(wanted, focus)
 end)
 
 ----------------------------------------------------------------------- binding
@@ -1207,4 +1418,4 @@ for _, child in ipairs(beysFolder:GetChildren()) do
 	tryBind(child)
 end
 ]=====])
-print('Spinforge installed (6 scripts). Press Play.')
+print('Spinforge installed (7 scripts). Press Play.')

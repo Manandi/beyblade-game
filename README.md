@@ -19,6 +19,18 @@ Run the paste again after any update; it replaces the old scripts.
 
 **With Rojo:** install [Rojo](https://rojo.space), run `rojo serve` here, and connect from the Studio plugin.
 
+### Better-looking beys (one-time mesh import)
+The bey parts are modelled in Blender ([previews](assets/previews/)). Without the meshes the game still runs,
+using simple block shapes. To get the real models:
+1. Download the three files in [`assets/meshes/`](assets/meshes/): `layers.fbx`, `discs.fbx` and `drivers.fbx`
+   (open each on GitHub and click **Download raw file**).
+2. In Studio, click **Import** (Home tab) or **File > Import 3D**, pick `layers.fbx`, and click **Import** with the default options.
+3. A model named `layers` appears in the Explorer (in Workspace). Drag it into **ReplicatedStorage > BeyMeshes**.
+4. Repeat for `discs.fbx` and `drivers.fbx`, then press **Play**.
+
+Save the place (File > Save) so you don't have to import again. Re-running the installer keeps the BeyMeshes folder.
+After the meshes are regenerated (`tools/blender/build_beys.py`), delete the three models in BeyMeshes and import the new files.
+
 ### Controls
 | Input | Action |
 |---|---|
@@ -34,8 +46,9 @@ A small readout (top left) shows tilt, speed and state. Every tuning number is i
 | Path | What |
 |---|---|
 | `src/shared/BeyConfig.lua` | 33 original parts, stats, level scaling, movement tuning, crate odds and rolls |
-| `src/shared/BeyDesigns.lua`, `BeyVisuals.lua` | Look of every part, built in-engine from basic shapes |
-| `src/server/` | Test stadium and bey spawner (slam validation) |
+| `src/shared/BeyDesigns.lua`, `BeyVisuals.lua` | Colours and style of every part; builds the bey from the imported meshes, or from basic shapes if they are missing |
+| `tools/blender/build_beys.py`, `assets/` | Blender modelling of all 33 parts: FBX files to import, `BeyMeshData.lua` (sizes) and preview images |
+| `src/server/` | Round test stadium (bowl with a steep launch lip) and bey spawner (slam validation) |
 | `src/client/BeyController.client.lua` | Movement, tilt, launch, slam, camera, touch and gamepad |
 | `tools/run_tests.sh` | Checks the config under the plain `luau` CLI: odds total exactly 100%, Ultra Legendary is +10%, simulated rolls, every part has a distinct design |
 | `tools/make_installer.py` | Regenerates `install_in_studio.lua` after you change `src/` |

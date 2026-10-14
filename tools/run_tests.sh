@@ -8,6 +8,9 @@ build() { # $1 = path to BeyConfig.lua
   echo "local BeyConfig = (function()"
   cat "$1"
   echo "end)()"
+  echo "local BeyMeshData = (function()"
+  cat src/shared/BeyMeshData.lua
+  echo "end)()"
   echo "local BeyDesigns = (function()"
   cat src/shared/BeyDesigns.lua
   echo "end)()"

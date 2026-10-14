@@ -107,7 +107,7 @@ local function parkAvatar(character)
 		humanoid.JumpHeight = 0
 	end
 	if root then
-		root.CFrame = CFrame.new(0, 4, 24)
+		root.CFrame = CFrame.new(0, 4, 70) -- outside the stadium
 		root.Anchored = true
 	end
 end
