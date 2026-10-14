@@ -57,6 +57,9 @@ This repo started inside the owner's `Manandi/god` repo (the Hollow Roots game) 
   built correctly. The controller then blocked forever on `PlayerModule:WaitForChild` (line 23), so there was no movement or camera.
   Fixed: it no longer waits on it; it uses `PlayerModule` if it loads within 10 s and otherwise its own keyboard, gamepad and touch-stick reader.
   Movement, tilt, launch and slam are still unverified.
+- **2026-10-14, second run:** owner: physics "not bad", but tilt up sometimes leaned the bey down. Cause: the tilt was relative to the
+  camera, not the travel direction. Fixed: the nose now points along the travel direction (camera facing when nearly still;
+  `NoseMinSpeed`, `NoseTurnRate`), so nose up always means up the way the bey is going.
 
 ### Status: untested in Studio
 

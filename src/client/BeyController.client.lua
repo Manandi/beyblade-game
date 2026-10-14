@@ -88,6 +88,7 @@ local lastJumpAt = -10
 local jumpQueued, slamQueued = false, false
 local lastLandSpeed = 0
 local focus = nil
+local noseYaw = 0 -- which way the bey's nose points: its travel direction, so "tilt up" always means up the way you're going
 
 local rayParams = RaycastParams.new()
 rayParams.FilterType = Enum.RaycastFilterType.Exclude
@@ -313,7 +314,12 @@ local function step(dt)
 	body.AssemblyLinearVelocity = vel
 
 	if align then
-		align.CFrame = CFrame.Angles(0, yaw, 0) * CFrame.Angles(pitch, 0, 0)
+		-- Point the nose along the travel direction (the camera's facing when nearly still), turning smoothly.
+		local flat = Vector3.new(vel.X, 0, vel.Z)
+		local targetYaw = flat.Magnitude > M.NoseMinSpeed and math.atan2(-flat.X, -flat.Z) or yaw
+		local diff = (targetYaw - noseYaw + math.pi) % (2 * math.pi) - math.pi
+		noseYaw = noseYaw + diff * math.min(1, M.NoseTurnRate * dt)
+		align.CFrame = CFrame.Angles(0, noseYaw, 0) * CFrame.Angles(pitch, 0, 0)
 	end
 
 	readout.Text = string.format(
@@ -360,6 +366,7 @@ local function bind(newModel)
 	body = model:WaitForChild("Body")
 	align = model:WaitForChild("Align")
 	yaw, pitch = 0, 0
+	noseYaw = 0
 	focus = nil
 	slamming = false
 	wasGrounded = false

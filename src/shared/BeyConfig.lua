@@ -153,6 +153,8 @@ BeyConfig.Movement = {
 	JumpSpeed = 55, -- upward speed of a jump
 	JumpTiltBonus = 0.35, -- aiming up adds up to this fraction to the jump
 	MaxTiltDeg = 40, -- how far the mouse can pitch the bey up or down
+	NoseMinSpeed = 4, -- below this speed the nose faces the camera direction instead of the travel direction
+	NoseTurnRate = 10, -- how fast the nose swings round to a new travel direction
 	LaunchFactor = 1.1, -- ramp takeoff: extra upward speed = flat speed * this * tilt (aiming up)
 	LaunchDownFactor = 0.4, -- aiming down at takeoff flattens the launch by this much
 	MinLaunchSpeed = 10, -- below this flat speed there is no takeoff boost
