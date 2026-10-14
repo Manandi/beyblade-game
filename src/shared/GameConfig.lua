@@ -88,6 +88,7 @@ GameConfig.Progression = {
 	-- never sold for Shards (it is the paid tier, and paid crates are disabled for now).
 	Prices = { Common = 20, Uncommon = 60, Rare = 150, Epic = 350, Legendary = 800 },
 	RecentBattleMemory = 30, -- battle ids remembered per player to refuse duplicate rewards
+	MinLossSecondsForReward = 20, -- a loss pays nothing if the battle lasted less than this (stops ring-out farming)
 }
 
 GameConfig.Data = {

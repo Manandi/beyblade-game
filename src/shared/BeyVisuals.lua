@@ -5,9 +5,9 @@
 -- Call BeyVisuals.Attach on the SERVER after the model is parented to Workspace (so welds capture the layout).
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local BeyConfig = require(ReplicatedStorage:WaitForChild("BeyConfig"))
-local BeyDesigns = require(ReplicatedStorage:WaitForChild("BeyDesigns"))
-local BeyMeshData = require(ReplicatedStorage:WaitForChild("BeyMeshData"))
+local BeyConfig = require(script.Parent.BeyConfig)
+local BeyDesigns = require(script.Parent.BeyDesigns)
+local BeyMeshData = require(script.Parent.BeyMeshData)
 
 local BeyVisuals = {}
 

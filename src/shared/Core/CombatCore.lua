@@ -16,7 +16,7 @@ end
 
 local function stat(stats, name)
 	local v = stats and stats[name]
-	return finite(v) and math.max(v, 0) or 0
+	return finite(v) and math.max(v :: number, 0) or 0
 end
 
 -------------------------------------------------------------------------------- spin

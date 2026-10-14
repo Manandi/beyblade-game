@@ -2,6 +2,7 @@
 """Runs every tools/tests/*.test.luau under the plain `luau` CLI (must be on PATH).
 
 Each test file names the modules it needs with header lines:  --@use <path> <LocalName>
+  --@include <path>  inserts a file as-is (the Roblox mock);  --@sources  embeds every src/**/*.lua as SOURCES[path]
 The runner builds one script: stubs.luau, then each module wrapped as `local Name = (function() ... end)()`,
 then the test. Modules therefore must not require() other modules at load time (the pure Core modules don't).
 It also checks that BeyConfig refuses to load when crate odds do not total 100%.
@@ -21,6 +22,19 @@ STUBS = open(os.path.join(ROOT, "tools", "tests", "stubs.luau")).read()
 def build(test_path, replace=None):
     test = open(test_path).read()
     parts = [STUBS]
+    for path in re.findall(r"^--@include (\S+)\s*$", test, re.M):
+        parts.append(open(os.path.join(ROOT, path)).read())
+    if re.search(r"^--@sources\s*$", test, re.M):
+        entries = []
+        for dirpath, _, files in os.walk(os.path.join(ROOT, "src")):
+            for fname in sorted(files):
+                if fname.endswith(".lua"):
+                    full = os.path.join(dirpath, fname)
+                    rel = os.path.relpath(full, ROOT).replace(os.sep, "/")
+                    text = open(full).read()
+                    assert "]======]" not in text
+                    entries.append(f'["{rel}"] = [======[\n{text}]======],')
+        parts.append("SOURCES = {\n" + "\n".join(entries) + "\n}\n")
     for path, name in re.findall(r"^--@use (\S+) (\w+)\s*$", test, re.M):
         src = open(os.path.join(ROOT, path)).read()
         if replace and replace[0] == path:

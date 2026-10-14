@@ -4,22 +4,13 @@
     "$className": "DataModel",
     "ReplicatedStorage": {
       "$className": "ReplicatedStorage",
-      "BeyConfig": {
-        "$path": "src/shared/BeyConfig.lua"
-      },
-      "BeyDesigns": {
-        "$path": "src/shared/BeyDesigns.lua"
-      },
-      "BeyVisuals": {
-        "$path": "src/shared/BeyVisuals.lua"
-      },
-      "BeyMeshData": {
-        "$path": "src/shared/BeyMeshData.lua"
+      "Spinforge": {
+        "$path": "src/shared"
       }
     },
     "ServerScriptService": {
       "$className": "ServerScriptService",
-      "Server": {
+      "Spinforge": {
         "$path": "src/server"
       }
     },
@@ -27,7 +18,7 @@
       "$className": "StarterPlayer",
       "StarterPlayerScripts": {
         "$className": "StarterPlayerScripts",
-        "Client": {
+        "Spinforge": {
           "$path": "src/client"
         }
       }
