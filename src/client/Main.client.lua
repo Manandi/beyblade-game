@@ -28,6 +28,8 @@ local Effects = require(script.Parent.Effects)
 local Menus = require(script.Parent.Menus)
 local Tutorial = require(script.Parent.Tutorial)
 local Controller = require(script.Parent.Controller)
+local LaunchCore = require(Shared.Core.LaunchCore)
+local GameConfig = require(Shared.GameConfig)
 
 local profile = nil
 local function settings()
@@ -91,8 +93,17 @@ remotes.BattleEvent.OnClientEvent:Connect(function(e)
 		inBattle = true
 		hud:closeBattle()
 		hud:countdown(e.seconds or 3, e.foe, e.difficulty)
+		if type(e.meter) == "table" then
+			hud:showLaunch(e.meter)
+		end
+	elseif e.kind == "launchLocked" then
+		-- the server's verdict (normally the same as what we showed)
+		hud:lockLaunch(nil, e.label or "WEAK")
 	elseif e.kind == "started" then
-		hud:started()
+		hud:started(e.launch, e.foeLaunch)
+		if type(e.launch) == "table" then
+			Controller.launch(e.launch.speed, e.launch.boost)
+		end
 	elseif e.kind == "hit" then
 		if (e.taken or 0) > 0.5 then
 			hud:popup(("-%d"):format(math.floor(e.taken + 0.5)), Color3.fromRGB(255, 110, 110), false)
@@ -124,6 +135,35 @@ remotes.BattleEvent.OnClientEvent:Connect(function(e)
 		hud:closeBattle()
 	elseif e.kind == "openWorkshop" then
 		menus:open()
+	end
+end)
+
+-- Launch meter: the needle runs on the shared server clock; one press locks it and tells the server when.
+local function pressLaunch()
+	local meter = hud.launchMeter
+	if not meter or hud.launchLocked then
+		return
+	end
+	local t = Workspace:GetServerTimeNow()
+	local pos = LaunchCore.needle(meter, t)
+	local _, label = LaunchCore.quality(meter, pos, GameConfig.Launch)
+	hud:lockLaunch(pos, label)
+	remotes.Request:FireServer({ action = "launch", t = t })
+end
+UserInputService.InputBegan:Connect(function(input, processed)
+	if processed or not hud.launchMeter then
+		return
+	end
+	local kc = input.KeyCode
+	if kc == Enum.KeyCode.Space or kc == Enum.KeyCode.ButtonA or kc == Enum.KeyCode.ButtonR2 or input.UserInputType == Enum.UserInputType.MouseButton1 then
+		pressLaunch()
+	end
+end)
+hud.touchLaunch.Activated:Connect(pressLaunch)
+RunService.RenderStepped:Connect(function()
+	local meter = hud.launchMeter
+	if meter and not hud.launchLocked then
+		hud:setNeedle(LaunchCore.needle(meter, Workspace:GetServerTimeNow()))
 	end
 end)
 

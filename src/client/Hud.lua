@@ -128,6 +128,21 @@ function Hud.new(player)
 	self.resultClose = Ui.label(rp, { Position = UDim2.new(0, 0, 1, -18), Size = UDim2.new(1, 0, 0, 16), TextColor3 = C.muted, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Center, ZIndex = 11 })
 	self.resultFrame = rp
 
+	-- launch meter (during the countdown): a needle sweeps across; lock it in the green zone
+	local lm = Ui.panel(gui, { Name = "Launch", AnchorPoint = Vector2.new(0.5, 1), Position = UDim2.new(0.5, 0, 1, -70), Size = UDim2.fromOffset(460, 92), Visible = false, ZIndex = 8 })
+	Ui.pad(lm, 10)
+	self.launchTitle = Ui.label(lm, { Size = UDim2.new(1, 0, 0, 20), Font = Enum.Font.GothamBlack, TextSize = 18, TextXAlignment = Enum.TextXAlignment.Center, Text = "LAUNCH: stop the needle in the GREEN", ZIndex = 9 })
+	local track = Ui.make("Frame", { Position = UDim2.fromOffset(0, 28), Size = UDim2.new(1, 0, 0, 22), BackgroundColor3 = Color3.fromRGB(70, 30, 30), BorderSizePixel = 0, ZIndex = 9 }, lm)
+	Ui.corner(track, 6)
+	self.launchYellow = Ui.make("Frame", { AnchorPoint = Vector2.new(0.5, 0), Size = UDim2.fromScale(0.3, 1), BackgroundColor3 = C.warn, BorderSizePixel = 0, ZIndex = 10 }, track)
+	self.launchGreen = Ui.make("Frame", { AnchorPoint = Vector2.new(0.5, 0), Size = UDim2.fromScale(0.12, 1), BackgroundColor3 = C.good, BorderSizePixel = 0, ZIndex = 11 }, track)
+	self.launchNeedle = Ui.make("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0, 0.5), Size = UDim2.new(0, 6, 1, 12), BackgroundColor3 = C.text, BorderSizePixel = 0, ZIndex = 12 }, track)
+	Ui.corner(self.launchNeedle, 3)
+	self.launchHint = Ui.label(lm, { Position = UDim2.fromOffset(0, 56), Size = UDim2.new(1, 0, 0, 18), TextSize = 14, TextColor3 = C.muted, TextXAlignment = Enum.TextXAlignment.Center, ZIndex = 9 })
+	self.launchFrame = lm
+	self.touchLaunch = Ui.button(gui, "LAUNCH", { AnchorPoint = Vector2.new(1, 1), Position = UDim2.new(1, -24, 1, -150), Size = UDim2.fromOffset(120, 120), BackgroundColor3 = Color3.fromRGB(40, 130, 70), TextSize = 22, Visible = false, ZIndex = 9 })
+	Ui.corner(self.touchLaunch, 60)
+
 	-- toasts (top centre, under the battle bar)
 	self.toastLabel = Ui.label(gui, {
 		AnchorPoint = Vector2.new(0.5, 0),
@@ -244,11 +259,66 @@ function Hud:countdown(seconds, foe, difficulty)
 	end)
 end
 
-function Hud:started()
+local LAUNCH_COLOR = { PERFECT = C.good, GOOD = C.warn, WEAK = C.bad, ["TOO LATE"] = C.bad }
+
+-- Shows the launch meter for this battle. meter: positions as shares of the bar (see Core/LaunchCore).
+function Hud:showLaunch(meter)
+	self.launchMeter = meter
+	self.launchLocked = false
+	self.launchGreen.Position = UDim2.fromScale(meter.zoneCenter, 0)
+	self.launchGreen.Size = UDim2.fromScale(meter.greenHalf * 2, 1)
+	self.launchYellow.Position = UDim2.fromScale(meter.zoneCenter, 0)
+	self.launchYellow.Size = UDim2.fromScale(meter.yellowHalf * 2, 1)
+	self.launchTitle.Text = "LAUNCH: stop the needle in the GREEN"
+	self.launchTitle.TextColor3 = C.text
+	local touch = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+	local pad = UserInputService.GamepadEnabled
+	self.launchHint.Text = touch and "Tap LAUNCH" or pad and "Press A" or "Press SPACE or click"
+	self.launchFrame.Visible = true
+	self.touchLaunch.Visible = UserInputService.TouchEnabled
+	self.touchSlam.Visible = false
+end
+
+-- Moves the needle (pos 0..1) until it is locked.
+function Hud:setNeedle(pos)
+	if not self.launchLocked then
+		self.launchNeedle.Position = UDim2.fromScale(math.clamp(pos, 0, 1), 0.5)
+	end
+end
+
+function Hud:lockLaunch(pos, label)
+	self.launchLocked = true
+	if pos then
+		self.launchNeedle.Position = UDim2.fromScale(math.clamp(pos, 0, 1), 0.5)
+	end
+	self.launchTitle.Text = label .. "!"
+	self.launchTitle.TextColor3 = LAUNCH_COLOR[label] or C.text
+	self.touchLaunch.Visible = false
+end
+
+function Hud:hideLaunch()
+	self.launchFrame.Visible = false
+	self.touchLaunch.Visible = false
+	self.launchMeter = nil
+	self.touchSlam.Visible = self.touchButtonsShown == true and UserInputService.TouchEnabled
+end
+
+-- "LET IT RIP!" plus how good the launch was and what it gave you.
+function Hud:started(launch, foeLaunch)
+	self:hideLaunch()
 	self.center.TextColor3 = C.good
-	self.center.Text = "GO!"
-	task.delay(0.8, function()
-		if self.center.Text == "GO!" then
+	self.center.Text = "LET IT RIP!"
+	if launch then
+		local pct = math.floor((launch.spin or 1) * 100 + 0.5)
+		self:toast(("%s launch: %d%% spin, +%d%% speed boost%s"):format(
+			launch.label == "TOO LATE" and "Late" or (launch.label:sub(1, 1) .. launch.label:sub(2):lower()),
+			pct,
+			math.floor((launch.boost or 0) * 100 + 0.5),
+			foeLaunch and ("   ·   Rival: " .. foeLaunch:lower()) or ""
+		), LAUNCH_COLOR[launch.label])
+	end
+	task.delay(1, function()
+		if self.center.Text == "LET IT RIP!" then
 			self.center.Text = ""
 		end
 	end)
@@ -354,6 +424,7 @@ function Hud:showResult(e, onRematch, onLeave)
 end
 
 function Hud:closeBattle()
+	self:hideLaunch()
 	if self.resultFrame.Visible then
 		self.resultFrame.Visible = false
 		self:_panel(false)
@@ -406,7 +477,9 @@ end
 
 function Hud:showTouchButtons(show)
 	local touch = UserInputService.TouchEnabled
-	self.touchSlam.Visible = show and touch
+	self.touchButtonsShown = show
+	-- SLAM shares its spot with LAUNCH, so it waits until the launch meter is gone.
+	self.touchSlam.Visible = show and touch and not self.launchMeter
 	self.touchJump.Visible = show and touch
 end
 

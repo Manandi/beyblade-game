@@ -172,4 +172,18 @@ T.test("drain: spin falls while active and never below zero; bad dt is ignored",
 	T.eq(b.result.winner, "b")
 end)
 
+T.test("launch: starting spin is set once, only during the countdown", function()
+	local b = newBattle(0)
+	T.ok(BC.setStartSpin(b, "player", 0.8))
+	T.near(b.sides.player.spin, 80, 1e-9)
+	T.ok(not BC.setStartSpin(b, "player", 1), "only once")
+	T.ok(not BC.setStartSpin(b, "player", 0 / 0))
+	T.ok(BC.setStartSpin(b, "villain", 5), "clamped")
+	T.near(b.sides.villain.spin, 120, 1e-9)
+	run(b, 0, B.Countdown + 0.1, 0.1)
+	local c = newBattle(0)
+	run(c, 0, B.Countdown + 0.1, 0.1)
+	T.ok(not BC.setStartSpin(c, "player", 0.5), "not once active")
+end)
+
 T.done()

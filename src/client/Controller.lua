@@ -20,6 +20,7 @@ local Shared = ReplicatedStorage:WaitForChild("Spinforge")
 local BeyConfig = require(Shared.BeyConfig)
 local GameConfig = require(Shared.GameConfig)
 local MC = require(Shared.Core.MovementCore)
+local LaunchCore = require(Shared.Core.LaunchCore)
 
 local M = BeyConfig.Movement
 local MAX_TILT = math.rad(M.MaxTiltDeg)
@@ -43,6 +44,8 @@ function Controller.start(ctx)
 	local ground, actions, stuck = MC.newGround(), MC.newActions(), MC.newStuck()
 	local jumpQueued, slamQueued = false, false
 	local pendingKnockback = Vector3.zero
+	local pendingLaunch = nil -- { speed, boost } from the server's "started" event
+	local launchBoost, launchAt = 0, -math.huge
 	local focus
 	local movedFor, fastAt = 0, -math.huge
 	local flipsAt, flipsRate, lastFlips = os.clock(), 0, 0
@@ -233,6 +236,7 @@ function Controller.start(ctx)
 		ground, actions, stuck = MC.newGround(), MC.newActions(), MC.newStuck()
 		clearInputs()
 		pendingKnockback = Vector3.zero
+		pendingLaunch, launchBoost, launchAt = nil, 0, -math.huge
 		local look = body.CFrame.LookVector
 		yaw = math.atan2(-look.X, -look.Z)
 		noseYaw, pitch, up, focus = yaw, 0, Vector3.yAxis, nil
@@ -307,7 +311,16 @@ function Controller.start(ctx)
 		if wish.Magnitude > 1 then
 			wish = wish.Unit
 		end
-		local speed = MC.topSpeed(stats(), M)
+		local speed = MC.topSpeed(stats(), M) * LaunchCore.boostMultiplier(launchBoost, now - launchAt, GameConfig.Launch)
+
+		-- LET IT RIP: shoot off the line where the camera is aiming.
+		if pendingLaunch then
+			local aim = Vector3.new(camera.CFrame.LookVector.X, 0, camera.CFrame.LookVector.Z)
+			aim = aim.Magnitude > 0.01 and aim.Unit or Vector3.new(-math.sin(yaw), 0, -math.cos(yaw))
+			vel = Vector3.new(aim.X * pendingLaunch.speed, vel.Y, aim.Z * pendingLaunch.speed)
+			launchBoost, launchAt = pendingLaunch.boost, now
+			pendingLaunch = nil
+		end
 
 		-- ground probe: a sphere cast (wider than a ray, so slab seams don't drop us), ray as fallback
 		local normal
@@ -432,6 +445,13 @@ function Controller.start(ctx)
 		camera.CFrame = CFrame.lookAt(wanted, focus) * effects:shakeOffset(dt)
 	end)
 
+	-- Called by Main when the battle starts. Applied on the first unfrozen frame.
+	function Controller.launch(speed, boost)
+		if body and MC.finite(speed) and MC.finite(boost) then
+			pendingLaunch = { speed = math.clamp(speed, 0, 120), boost = math.clamp(boost, 0, 1) }
+		end
+	end
+
 	function Controller.isBound()
 		return body ~= nil and body.Parent ~= nil
 	end
@@ -467,5 +487,7 @@ end
 function Controller.isBound()
 	return false
 end
+
+function Controller.launch() end
 
 return Controller

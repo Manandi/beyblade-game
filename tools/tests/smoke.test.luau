@@ -111,6 +111,36 @@ T.test("challenge: countdown with both beys frozen", function()
 	T.eq(S.Workspace.CurrentCamera.CameraType, Enum.CameraType.Scriptable, "client bound the bey camera")
 end)
 
+T.test("launch: SPACE in the green locks a PERFECT launch (judged by the server)", function()
+	local cd = events(alice, "countdown")
+	local meter = cd[#cd].meter
+	T.ok(type(meter) == "table" and meter.zoneCenter, "countdown carries the meter")
+	local hud = alice.PlayerGui.SpinforgeHud
+	T.ok(hud.Launch.Visible, "launch bar shown")
+	-- wait until the needle is in the green zone, then press SPACE through the real client input path
+	local LC = { needle = function(t)
+		local phase = ((t - meter.start) / meter.period) % 1
+		return phase < 0.5 and phase * 2 or (1 - phase) * 2
+	end }
+	local guard = 0
+	while math.abs(LC.needle(Mock.now) - meter.zoneCenter) > meter.greenHalf * 0.5 and guard < 400 do
+		Mock.advance(1 / 240, 1 / 240)
+		guard += 1
+	end
+	T.ok(Mock.now < meter.finish, "found the green zone during the countdown")
+	S.UserInputService.InputBegan:Fire({ KeyCode = Enum.KeyCode.Space, UserInputType = Enum.UserInputType.Keyboard }, false)
+	Mock.advance(1 / 60)
+	local locked = events(alice, "launchLocked")
+	T.eq(#locked, 1)
+	T.eq(locked[1].label, "PERFECT")
+	-- a second press changes nothing
+	S.UserInputService.InputBegan:Fire({ KeyCode = Enum.KeyCode.Space, UserInputType = Enum.UserInputType.Keyboard }, false)
+	remotes.Request:FireServer({ action = "launch", t = Mock.now })
+	Mock.advance(1 / 60)
+	T.eq(#events(alice, "launchLocked"), 1, "one press per battle")
+	noErrors("launch")
+end)
+
 T.test("battle starts after the countdown; physics handed out", function()
 	Mock.advance(3.2)
 	noErrors("start")
@@ -119,7 +149,13 @@ T.test("battle starts after the countdown; physics handed out", function()
 	T.eq(bodyOf(alice):GetNetworkOwner(), alice)
 	T.eq(villainBody():GetNetworkOwner(), nil)
 	T.eq(alice:GetAttribute("BattleState"), "active")
+	local st = events(alice, "started")[1]
+	T.eq(st.launch.label, "PERFECT")
+	T.near(st.launch.spin, 1, 1e-9, "perfect launch = full spin")
+	T.ok(st.launch.boost > 0.3, "speed boost")
 end)
+
+
 
 -- The mock has no stadium walls, so knockback or a dash could carry a bey past the ring-out radius. Steps that
 -- aren't about ring-outs keep both beys inside.
@@ -231,7 +267,22 @@ T.test("rematch starts a fresh battle; forfeiting pays nothing", function()
 	Mock.advance(0.1)
 	T.eq(count(events(alice, "countdown")), 2)
 	T.eq(#beysFolder():GetChildren(), 2, "no leftover beys from the last battle")
-	Mock.advance(3.2)
+	-- advance just past the start and check the bey left the line at (weak) launch speed
+	local before = count(events(alice, "started"))
+	local guard = 0
+	while count(events(alice, "started")) == before and guard < 400 do
+		Mock.advance(1 / 60)
+		guard += 1
+	end
+	Mock.advance(2 / 60)
+	local v = bodyOf(alice).AssemblyLinearVelocity
+	local flatSpeed = Vector3.new(v.X, 0, v.Z).Magnitude
+	T.ok(flatSpeed > 15, "launched off the line: " .. flatSpeed)
+	Mock.advance(0.5)
+	local st = events(alice, "started")
+	T.eq(st[#st].launch.label, "TOO LATE", "no press = weak launch")
+	local frac = st[#st].launch.spin
+	T.ok(frac < 0.8 and frac > 0.7, "weak launch starts with less spin: " .. frac)
 	remotes.Request:FireServer({ action = "forfeit" })
 	Mock.advance(0.1)
 	local fin = events(alice, "finished")

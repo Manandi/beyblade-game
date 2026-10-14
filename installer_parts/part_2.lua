@@ -91,12 +91,31 @@ GameConfig.Battle = {
 	StartRadius = 12, -- where the two beys start, either side of the centre
 }
 
+-- The skill launch during the countdown (see Core/LaunchCore.lua).
+GameConfig.Launch = {
+	Period = 1.1, -- seconds for the needle to sweep there and back
+	ZoneMin = 0.55, -- the green zone's centre is somewhere in this range, different each battle
+	ZoneMax = 0.85,
+	GreenHalf = 0.06, -- half-width of the green (perfect) zone, as a share of the bar
+	YellowHalf = 0.15, -- half-width of green + yellow (good)
+	Good = 0.6, -- quality at the outer edge of yellow (rises to 1 at the green edge)
+	Miss = 0.3, -- quality outside the zone
+	NoPress = 0.25, -- quality if you never press
+	MaxLatency = 0.6, -- the server accepts a press stamped up to this many seconds before it arrived
+	SpinAtWorst = 0.7, -- start with 70% spin at quality 0 ... 100% at a perfect launch
+	SpeedAtWorst = 18, -- launch speed off the line at quality 0 ...
+	SpeedAtBest = 75, -- ... and at a perfect launch
+	BoostAtBest = 0.35, -- +35% top speed right after a perfect launch ...
+	BoostTime = 4, -- ... fading to nothing over this many seconds
+}
+
 GameConfig.Difficulty = {
 	-- Speed: villain top-speed multiplier. Windup: seconds of warning before an attack. Aggression: 0..1 how often it
 	-- attacks when in range. Damage: multiplier on its hits. Reward: multiplier on rewards for beating it.
-	Easy = { Speed = 0.85, Windup = 1.0, Aggression = 0.45, Damage = 0.8, Reward = 0.8 },
-	Normal = { Speed = 0.95, Windup = 0.75, Aggression = 0.7, Damage = 1.0, Reward = 1.0 },
-	Hard = { Speed = 1.08, Windup = 0.55, Aggression = 0.95, Damage = 1.15, Reward = 1.5 },
+	-- Launch: how well it times its launch (0..1, with a little noise).
+	Easy = { Speed = 0.85, Windup = 1.0, Aggression = 0.45, Damage = 0.8, Reward = 0.8, Launch = 0.5 },
+	Normal = { Speed = 0.95, Windup = 0.75, Aggression = 0.7, Damage = 1.0, Reward = 1.0, Launch = 0.72 },
+	Hard = { Speed = 1.08, Windup = 0.55, Aggression = 0.95, Damage = 1.15, Reward = 1.5, Launch = 0.92 },
 }
 
 GameConfig.Villain = {
@@ -329,6 +348,17 @@ function BattleCore.update(b, now, dt)
 		table.insert(events, { kind = "cleanup" })
 	end
 	return events
+end
+
+-- The launch sets how much spin a side starts with (fraction of max). Only during the countdown, only once.
+function BattleCore.setStartSpin(b, key, fraction)
+	local s = b.sides[key]
+	if b.state ~= "countdown" or not s or s.launched or not finite(fraction) then
+		return false
+	end
+	s.spin = s.maxSpin * math.clamp(fraction, 0.05, 1)
+	s.launched = true
+	return true
 end
 
 -- Apply damage to a side. Ignored unless active; never negative or non-finite. Returns the amount applied.
@@ -598,6 +628,107 @@ function CombatCore.forget(rl, key)
 end
 
 return CombatCore
+]=====])
+install('RS', 'Core', 'ModuleScript', 'LaunchCore', [=====[
+--!nonstrict
+-- LaunchCore: the skill launch ("3, 2, 1, LET IT RIP!") as pure functions. Tested in tools/tests/launch.test.luau.
+--
+-- During the countdown a needle sweeps back and forth across a bar (0..1). The player presses once to lock it.
+-- Where it stops sets the launch quality q (0..1):
+--   green zone   perfect  q = 1
+--   yellow edge  good     q = Good .. 1 (closer to green = better)
+--   elsewhere    weak     q = Miss
+--   no press     weak     q = NoPress
+-- q then sets: starting spin (stamina), launch speed off the line, and a short top-speed boost that fades.
+-- L is GameConfig.Launch.
+
+local LaunchCore = {}
+
+local function finite(n)
+	return type(n) == "number" and n == n and n ~= math.huge and n ~= -math.huge
+end
+
+-- Meter for one battle. zoneCenter comes from the server's random number so it differs every battle.
+function LaunchCore.newMeter(start, duration, zoneRandom, L)
+	zoneRandom = finite(zoneRandom) and math.clamp(zoneRandom, 0, 1) or 0.5
+	return {
+		start = start,
+		finish = start + duration,
+		period = L.Period,
+		zoneCenter = L.ZoneMin + (L.ZoneMax - L.ZoneMin) * zoneRandom,
+		greenHalf = L.GreenHalf,
+		yellowHalf = L.YellowHalf,
+	}
+end
+
+-- Needle position (0..1) at time t: a triangle wave, so it slows into neither end and reverses sharply.
+function LaunchCore.needle(meter, t)
+	if not finite(t) then
+		return 0
+	end
+	local phase = ((t - meter.start) / meter.period) % 1
+	return phase < 0.5 and phase * 2 or (1 - phase) * 2
+end
+
+-- Quality and a label for a needle position.
+function LaunchCore.quality(meter, pos, L)
+	if not finite(pos) then
+		return L.Miss, "WEAK"
+	end
+	local d = math.abs(pos - meter.zoneCenter)
+	if d <= meter.greenHalf then
+		return 1, "PERFECT"
+	elseif d <= meter.yellowHalf then
+		local t = (d - meter.greenHalf) / (meter.yellowHalf - meter.greenHalf) -- 0 at green edge, 1 at yellow edge
+		return 1 - (1 - L.Good) * t, "GOOD"
+	end
+	return L.Miss, "WEAK"
+end
+
+-- Server-side check of a press. pressT: the client's reading of the shared server clock when it pressed.
+-- receivedT: when the server got it. Returns the press time to judge, or nil if it isn't acceptable.
+-- A press may arrive up to L.MaxLatency late; it may not claim a time after it arrived, or outside the meter.
+function LaunchCore.acceptPress(meter, pressT, receivedT, L)
+	if not finite(pressT) or not finite(receivedT) then
+		return nil
+	end
+	if pressT > receivedT + 0.05 or receivedT - pressT > L.MaxLatency then
+		return nil
+	end
+	if pressT < meter.start or pressT > meter.finish + 0.05 then
+		return nil
+	end
+	return pressT
+end
+
+-- What a launch quality does. Returns { spinFraction, speed, boost }:
+--   spinFraction  share of max spin the bey starts the battle with (stamina)
+--   speed         launch speed off the line (studs/s)
+--   boost         extra top speed right after launch (0.35 = +35%), fading over L.BoostTime
+function LaunchCore.effects(q, L)
+	q = finite(q) and math.clamp(q, 0, 1) or 0
+	return {
+		spinFraction = L.SpinAtWorst + (1 - L.SpinAtWorst) * q,
+		speed = L.SpeedAtWorst + (L.SpeedAtBest - L.SpeedAtWorst) * q,
+		boost = L.BoostAtBest * q,
+	}
+end
+
+-- Top-speed multiplier `elapsed` seconds after launch (fades linearly to 1).
+function LaunchCore.boostMultiplier(boost, elapsed, L)
+	if not finite(boost) or not finite(elapsed) or elapsed < 0 or elapsed >= L.BoostTime then
+		return 1
+	end
+	return 1 + boost * (1 - elapsed / L.BoostTime)
+end
+
+-- The villain's launch: around its difficulty's skill, with some noise. rand in 0..1.
+function LaunchCore.villainQuality(skill, rand)
+	rand = finite(rand) and rand or 0.5
+	return math.clamp(skill + (rand - 0.5) * 0.2, 0, 1)
+end
+
+return LaunchCore
 ]=====])
 install('RS', 'Core', 'ModuleScript', 'MovementCore', [=====[
 --!nonstrict
@@ -888,153 +1019,5 @@ function MovementCore.isStuck(s, grounded, vel, now, M)
 end
 
 return MovementCore
-]=====])
-install('RS', 'Core', 'ModuleScript', 'PlayerData', [=====[
---!nonstrict
--- PlayerData: the versioned save format, migration from older versions, and repair of bad values. Pure.
--- Version 1 fields:
---   Version, XP, Shards, Owned {partId = true}, Equipped {Layer, Disc, Driver}, Record {Wins, Losses, Draws},
---   RecentBattles {battleId...} (refuses duplicate rewards), Settings {CameraShake, ReducedEffects, TutorialDone}
--- A save written by a NEWER version is never migrated or overwritten (migrate returns nil, "newer").
-
-local PlayerData = {}
-PlayerData.VERSION = 1
-
-local function finite(n)
-	return type(n) == "number" and n == n and n ~= math.huge and n ~= -math.huge
-end
-
-local function count(n)
-	return finite(n) and n >= 0 and math.floor(n) or 0
-end
-
--- starter: { Layer = id, Disc = id, Driver = id }
-function PlayerData.new(starter)
-	local owned = {}
-	for _, id in pairs(starter) do
-		owned[id] = true
-	end
-	return {
-		Version = PlayerData.VERSION,
-		XP = 0,
-		Shards = 0,
-		Owned = owned,
-		Equipped = { Layer = starter.Layer, Disc = starter.Disc, Driver = starter.Driver },
-		Record = { Wins = 0, Losses = 0, Draws = 0 },
-		RecentBattles = {},
-		Settings = { CameraShake = true, ReducedEffects = false, TutorialDone = false },
-	}
-end
-
--- Repair a v1 table in place: unknown parts dropped, starter parts always owned, equipped parts owned and in the
--- right slot (else the starter part), counters non-negative integers, settings booleans.
-local function repair(d, starter, parts, recentMax)
-	d.XP = count(d.XP)
-	d.Shards = count(d.Shards)
-	local owned = {}
-	if type(d.Owned) == "table" then
-		for id, v in pairs(d.Owned) do
-			if v == true and parts[id] then
-				owned[id] = true
-			end
-		end
-	end
-	for _, id in pairs(starter) do
-		owned[id] = true
-	end
-	d.Owned = owned
-	local eq = type(d.Equipped) == "table" and d.Equipped or {}
-	local fixed = {}
-	for slot, starterId in pairs(starter) do
-		local id = eq[slot]
-		if type(id) == "string" and owned[id] and parts[id] and parts[id].Slot == slot then
-			fixed[slot] = id
-		else
-			fixed[slot] = starterId
-		end
-	end
-	d.Equipped = fixed
-	local rec = type(d.Record) == "table" and d.Record or {}
-	d.Record = { Wins = count(rec.Wins), Losses = count(rec.Losses), Draws = count(rec.Draws) }
-	local recent = {}
-	if type(d.RecentBattles) == "table" then
-		for _, id in ipairs(d.RecentBattles) do
-			if type(id) == "string" then
-				table.insert(recent, id)
-			end
-		end
-	end
-	while #recent > recentMax do
-		table.remove(recent, 1)
-	end
-	d.RecentBattles = recent
-	local s = type(d.Settings) == "table" and d.Settings or {}
-	d.Settings = {
-		CameraShake = s.CameraShake ~= false,
-		ReducedEffects = s.ReducedEffects == true,
-		TutorialDone = s.TutorialDone == true,
-	}
-	d.Version = PlayerData.VERSION
-	return d
-end
-
--- raw: whatever was stored (nil for a new player). Returns data, or nil + reason ("corrupt" | "newer").
-function PlayerData.migrate(raw, starter, parts, recentMax)
-	recentMax = recentMax or 30
-	if raw == nil then
-		return PlayerData.new(starter)
-	end
-	if type(raw) ~= "table" then
-		return nil, "corrupt"
-	end
-	local version = raw.Version
-	if version == nil then
-		version = 0
-	end
-	if not finite(version) then
-		return nil, "corrupt"
-	end
-	if version > PlayerData.VERSION then
-		return nil, "newer"
-	end
-	local d = raw
-	if version < 1 then
-		-- v0 (development saves before versioning): { xp, shards, parts = {id...}, equipped = {...} }
-		local owned = {}
-		if type(raw.parts) == "table" then
-			for _, id in ipairs(raw.parts) do
-				owned[id] = true
-			end
-		end
-		d = {
-			XP = raw.xp,
-			Shards = raw.shards,
-			Owned = owned,
-			Equipped = raw.equipped,
-		}
-	end
-	return repair(d, starter, parts, recentMax)
-end
-
--- What the client is allowed to see (no battle ids).
-function PlayerData.snapshot(d, level, saveStatus)
-	local owned = {}
-	for id in pairs(d.Owned) do
-		table.insert(owned, id)
-	end
-	table.sort(owned)
-	return {
-		XP = d.XP,
-		Level = level,
-		Shards = d.Shards,
-		Owned = owned,
-		Equipped = { Layer = d.Equipped.Layer, Disc = d.Equipped.Disc, Driver = d.Equipped.Driver },
-		Record = { Wins = d.Record.Wins, Losses = d.Record.Losses, Draws = d.Record.Draws },
-		Settings = { CameraShake = d.Settings.CameraShake, ReducedEffects = d.Settings.ReducedEffects, TutorialDone = d.Settings.TutorialDone },
-		SaveStatus = saveStatus,
-	}
-end
-
-return PlayerData
 ]=====])
 print('Spinforge installer part 2 of 7 done. Now run part 3.')

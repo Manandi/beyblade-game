@@ -17,6 +17,7 @@ local Shared = ReplicatedStorage:WaitForChild("Spinforge")
 local BeyConfig = require(Shared.BeyConfig)
 local GameConfig = require(Shared.GameConfig)
 local MC = require(Shared.Core.MovementCore)
+local LaunchCore = require(Shared.Core.LaunchCore)
 
 local M = BeyConfig.Movement
 local VillainAI = {}
@@ -74,6 +75,13 @@ function VillainAI.new(rec, diff, center, ignore)
 	return self
 end
 
+-- The villain's launch boost (from its launch quality): extra top speed that fades over GameConfig.Launch.BoostTime.
+function VillainAI:launched(boost, now)
+	self.launchBoost = boost
+	self.launchAt = now
+	self.nextAttackAt = now + 1.0
+end
+
 function VillainAI:setTelegraph(kind)
 	if kind == nil then
 		self.highlight.Enabled = false
@@ -110,6 +118,9 @@ function VillainAI:step(dt, now, target, spinFraction, onSlamImpact)
 	local pos = body.Position
 	local vel = MC.sanitizeVelocity(body.AssemblyLinearVelocity, M)
 	local speed = MC.topSpeed(self.rec.stats, M) * self.diff.Speed
+	if self.launchAt then
+		speed *= LaunchCore.boostMultiplier(self.launchBoost, now - self.launchAt, GameConfig.Launch)
+	end
 
 	-- ground probe (same rules as the player: sphere probe, hysteresis)
 	local normal

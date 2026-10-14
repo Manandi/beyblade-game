@@ -39,6 +39,7 @@ After the meshes are regenerated (`tools/blender/build_beys.py`), delete the thr
 |---|---|---|---|
 | Drive | WASD | Left stick | Drag on the left half |
 | Tilt (down = lean in and go faster, up = brake) | Mouse | Right stick | Drag on the right half |
+| Launch (during 3-2-1: stop the needle in the green) | Space / click | A / right trigger | LAUNCH |
 | Jump | Space | A | JUMP |
 | Slam (in the air) | Click | Right trigger | SLAM |
 | Practice: reset / back to hub | R / Q | Y / B | Back to hub |

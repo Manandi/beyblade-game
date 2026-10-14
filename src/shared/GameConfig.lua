@@ -57,12 +57,31 @@ GameConfig.Battle = {
 	StartRadius = 12, -- where the two beys start, either side of the centre
 }
 
+-- The skill launch during the countdown (see Core/LaunchCore.lua).
+GameConfig.Launch = {
+	Period = 1.1, -- seconds for the needle to sweep there and back
+	ZoneMin = 0.55, -- the green zone's centre is somewhere in this range, different each battle
+	ZoneMax = 0.85,
+	GreenHalf = 0.06, -- half-width of the green (perfect) zone, as a share of the bar
+	YellowHalf = 0.15, -- half-width of green + yellow (good)
+	Good = 0.6, -- quality at the outer edge of yellow (rises to 1 at the green edge)
+	Miss = 0.3, -- quality outside the zone
+	NoPress = 0.25, -- quality if you never press
+	MaxLatency = 0.6, -- the server accepts a press stamped up to this many seconds before it arrived
+	SpinAtWorst = 0.7, -- start with 70% spin at quality 0 ... 100% at a perfect launch
+	SpeedAtWorst = 18, -- launch speed off the line at quality 0 ...
+	SpeedAtBest = 75, -- ... and at a perfect launch
+	BoostAtBest = 0.35, -- +35% top speed right after a perfect launch ...
+	BoostTime = 4, -- ... fading to nothing over this many seconds
+}
+
 GameConfig.Difficulty = {
 	-- Speed: villain top-speed multiplier. Windup: seconds of warning before an attack. Aggression: 0..1 how often it
 	-- attacks when in range. Damage: multiplier on its hits. Reward: multiplier on rewards for beating it.
-	Easy = { Speed = 0.85, Windup = 1.0, Aggression = 0.45, Damage = 0.8, Reward = 0.8 },
-	Normal = { Speed = 0.95, Windup = 0.75, Aggression = 0.7, Damage = 1.0, Reward = 1.0 },
-	Hard = { Speed = 1.08, Windup = 0.55, Aggression = 0.95, Damage = 1.15, Reward = 1.5 },
+	-- Launch: how well it times its launch (0..1, with a little noise).
+	Easy = { Speed = 0.85, Windup = 1.0, Aggression = 0.45, Damage = 0.8, Reward = 0.8, Launch = 0.5 },
+	Normal = { Speed = 0.95, Windup = 0.75, Aggression = 0.7, Damage = 1.0, Reward = 1.0, Launch = 0.72 },
+	Hard = { Speed = 1.08, Windup = 0.55, Aggression = 0.95, Damage = 1.15, Reward = 1.5, Launch = 0.92 },
 }
 
 GameConfig.Villain = {

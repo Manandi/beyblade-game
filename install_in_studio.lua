@@ -847,12 +847,31 @@ GameConfig.Battle = {
 	StartRadius = 12, -- where the two beys start, either side of the centre
 }
 
+-- The skill launch during the countdown (see Core/LaunchCore.lua).
+GameConfig.Launch = {
+	Period = 1.1, -- seconds for the needle to sweep there and back
+	ZoneMin = 0.55, -- the green zone's centre is somewhere in this range, different each battle
+	ZoneMax = 0.85,
+	GreenHalf = 0.06, -- half-width of the green (perfect) zone, as a share of the bar
+	YellowHalf = 0.15, -- half-width of green + yellow (good)
+	Good = 0.6, -- quality at the outer edge of yellow (rises to 1 at the green edge)
+	Miss = 0.3, -- quality outside the zone
+	NoPress = 0.25, -- quality if you never press
+	MaxLatency = 0.6, -- the server accepts a press stamped up to this many seconds before it arrived
+	SpinAtWorst = 0.7, -- start with 70% spin at quality 0 ... 100% at a perfect launch
+	SpeedAtWorst = 18, -- launch speed off the line at quality 0 ...
+	SpeedAtBest = 75, -- ... and at a perfect launch
+	BoostAtBest = 0.35, -- +35% top speed right after a perfect launch ...
+	BoostTime = 4, -- ... fading to nothing over this many seconds
+}
+
 GameConfig.Difficulty = {
 	-- Speed: villain top-speed multiplier. Windup: seconds of warning before an attack. Aggression: 0..1 how often it
 	-- attacks when in range. Damage: multiplier on its hits. Reward: multiplier on rewards for beating it.
-	Easy = { Speed = 0.85, Windup = 1.0, Aggression = 0.45, Damage = 0.8, Reward = 0.8 },
-	Normal = { Speed = 0.95, Windup = 0.75, Aggression = 0.7, Damage = 1.0, Reward = 1.0 },
-	Hard = { Speed = 1.08, Windup = 0.55, Aggression = 0.95, Damage = 1.15, Reward = 1.5 },
+	-- Launch: how well it times its launch (0..1, with a little noise).
+	Easy = { Speed = 0.85, Windup = 1.0, Aggression = 0.45, Damage = 0.8, Reward = 0.8, Launch = 0.5 },
+	Normal = { Speed = 0.95, Windup = 0.75, Aggression = 0.7, Damage = 1.0, Reward = 1.0, Launch = 0.72 },
+	Hard = { Speed = 1.08, Windup = 0.55, Aggression = 0.95, Damage = 1.15, Reward = 1.5, Launch = 0.92 },
 }
 
 GameConfig.Villain = {
@@ -1085,6 +1104,17 @@ function BattleCore.update(b, now, dt)
 		table.insert(events, { kind = "cleanup" })
 	end
 	return events
+end
+
+-- The launch sets how much spin a side starts with (fraction of max). Only during the countdown, only once.
+function BattleCore.setStartSpin(b, key, fraction)
+	local s = b.sides[key]
+	if b.state ~= "countdown" or not s or s.launched or not finite(fraction) then
+		return false
+	end
+	s.spin = s.maxSpin * math.clamp(fraction, 0.05, 1)
+	s.launched = true
+	return true
 end
 
 -- Apply damage to a side. Ignored unless active; never negative or non-finite. Returns the amount applied.
@@ -1354,6 +1384,107 @@ function CombatCore.forget(rl, key)
 end
 
 return CombatCore
+]=====])
+install('RS', 'Core', 'ModuleScript', 'LaunchCore', [=====[
+--!nonstrict
+-- LaunchCore: the skill launch ("3, 2, 1, LET IT RIP!") as pure functions. Tested in tools/tests/launch.test.luau.
+--
+-- During the countdown a needle sweeps back and forth across a bar (0..1). The player presses once to lock it.
+-- Where it stops sets the launch quality q (0..1):
+--   green zone   perfect  q = 1
+--   yellow edge  good     q = Good .. 1 (closer to green = better)
+--   elsewhere    weak     q = Miss
+--   no press     weak     q = NoPress
+-- q then sets: starting spin (stamina), launch speed off the line, and a short top-speed boost that fades.
+-- L is GameConfig.Launch.
+
+local LaunchCore = {}
+
+local function finite(n)
+	return type(n) == "number" and n == n and n ~= math.huge and n ~= -math.huge
+end
+
+-- Meter for one battle. zoneCenter comes from the server's random number so it differs every battle.
+function LaunchCore.newMeter(start, duration, zoneRandom, L)
+	zoneRandom = finite(zoneRandom) and math.clamp(zoneRandom, 0, 1) or 0.5
+	return {
+		start = start,
+		finish = start + duration,
+		period = L.Period,
+		zoneCenter = L.ZoneMin + (L.ZoneMax - L.ZoneMin) * zoneRandom,
+		greenHalf = L.GreenHalf,
+		yellowHalf = L.YellowHalf,
+	}
+end
+
+-- Needle position (0..1) at time t: a triangle wave, so it slows into neither end and reverses sharply.
+function LaunchCore.needle(meter, t)
+	if not finite(t) then
+		return 0
+	end
+	local phase = ((t - meter.start) / meter.period) % 1
+	return phase < 0.5 and phase * 2 or (1 - phase) * 2
+end
+
+-- Quality and a label for a needle position.
+function LaunchCore.quality(meter, pos, L)
+	if not finite(pos) then
+		return L.Miss, "WEAK"
+	end
+	local d = math.abs(pos - meter.zoneCenter)
+	if d <= meter.greenHalf then
+		return 1, "PERFECT"
+	elseif d <= meter.yellowHalf then
+		local t = (d - meter.greenHalf) / (meter.yellowHalf - meter.greenHalf) -- 0 at green edge, 1 at yellow edge
+		return 1 - (1 - L.Good) * t, "GOOD"
+	end
+	return L.Miss, "WEAK"
+end
+
+-- Server-side check of a press. pressT: the client's reading of the shared server clock when it pressed.
+-- receivedT: when the server got it. Returns the press time to judge, or nil if it isn't acceptable.
+-- A press may arrive up to L.MaxLatency late; it may not claim a time after it arrived, or outside the meter.
+function LaunchCore.acceptPress(meter, pressT, receivedT, L)
+	if not finite(pressT) or not finite(receivedT) then
+		return nil
+	end
+	if pressT > receivedT + 0.05 or receivedT - pressT > L.MaxLatency then
+		return nil
+	end
+	if pressT < meter.start or pressT > meter.finish + 0.05 then
+		return nil
+	end
+	return pressT
+end
+
+-- What a launch quality does. Returns { spinFraction, speed, boost }:
+--   spinFraction  share of max spin the bey starts the battle with (stamina)
+--   speed         launch speed off the line (studs/s)
+--   boost         extra top speed right after launch (0.35 = +35%), fading over L.BoostTime
+function LaunchCore.effects(q, L)
+	q = finite(q) and math.clamp(q, 0, 1) or 0
+	return {
+		spinFraction = L.SpinAtWorst + (1 - L.SpinAtWorst) * q,
+		speed = L.SpeedAtWorst + (L.SpeedAtBest - L.SpeedAtWorst) * q,
+		boost = L.BoostAtBest * q,
+	}
+end
+
+-- Top-speed multiplier `elapsed` seconds after launch (fades linearly to 1).
+function LaunchCore.boostMultiplier(boost, elapsed, L)
+	if not finite(boost) or not finite(elapsed) or elapsed < 0 or elapsed >= L.BoostTime then
+		return 1
+	end
+	return 1 + boost * (1 - elapsed / L.BoostTime)
+end
+
+-- The villain's launch: around its difficulty's skill, with some noise. rand in 0..1.
+function LaunchCore.villainQuality(skill, rand)
+	rand = finite(rand) and rand or 0.5
+	return math.clamp(skill + (rand - 0.5) * 0.2, 0, 1)
+end
+
+return LaunchCore
 ]=====])
 install('RS', 'Core', 'ModuleScript', 'MovementCore', [=====[
 --!nonstrict
@@ -2013,7 +2144,8 @@ install('SSS', '', 'ModuleScript', 'BattleService', [=====[
 --   Challenge prompt -> (queue if the arena is busy) -> countdown (both beys frozen) -> active -> finished
 --   -> result screen (Rematch / Leave, or it closes itself) -> cleanup (beys removed, avatar restored)
 -- What the server trusts from the client: only the player's bey position/velocity (client-owned physics, which a
--- cheater could fake) and a bare "my slam landed" signal, which is checked against the fall the server observed.
+-- cheater could fake), a bare "my slam landed" signal (checked against the fall the server observed), and the time
+-- the player pressed LAUNCH (checked against the meter's window; the server judges the timing itself).
 -- Clients never send damage, results, XP or Shards. See HANDOFF.md "Residual exploit exposure".
 
 local Players = game:GetService("Players")
@@ -2027,6 +2159,7 @@ local GameConfig = require(Shared.GameConfig)
 local CombatCore = require(Shared.Core.CombatCore)
 local BattleCore = require(Shared.Core.BattleCore)
 local Progression = require(Shared.Core.Progression)
+local LaunchCore = require(Shared.Core.LaunchCore)
 
 local BeyFactory = require(script.Parent.BeyFactory)
 local BeyService = require(script.Parent.BeyService)
@@ -2034,7 +2167,7 @@ local DataService = require(script.Parent.DataService)
 local VillainAI = require(script.Parent.VillainAI)
 local World = require(script.Parent.World)
 
-local C, B, V, P = GameConfig.Combat, GameConfig.Battle, GameConfig.Villain, GameConfig.Progression
+local C, B, V, P, L = GameConfig.Combat, GameConfig.Battle, GameConfig.Villain, GameConfig.Progression, GameConfig.Launch
 
 local BattleService = {}
 
@@ -2206,16 +2339,30 @@ startBattle = function(player)
 		villainFall = CombatCore.newFallTracker(),
 		outTimers = {},
 		startedAt = nil,
+		-- Skill launch: the meter runs on the shared server clock during the countdown.
+		meter = LaunchCore.newMeter(Workspace:GetServerTimeNow(), B.Countdown, Random.new():NextNumber(), L),
+		launch = {}, -- side -> { quality, label }
 	}
 	rec.battle = BattleCore.new(rec.id, {
 		{ key = "player", maxSpin = mine.maxSpin, drain = CombatCore.drainPerSecond(mine.stats, C) },
 		{ key = "villain", maxSpin = villain.maxSpin, drain = CombatCore.drainPerSecond(villain.stats, C) },
 	}, B, now)
 	rec.ai = VillainAI.new(villain, diff, center, { BeyService.folder() })
+	-- The villain's launch is decided now (its skill depends on difficulty).
+	local vq = LaunchCore.villainQuality(diff.Launch or 0.7, Random.new():NextNumber())
+	rec.launch.villain = { quality = vq, label = vq >= 0.95 and "PERFECT" or vq >= L.Good and "GOOD" or "WEAK" }
+	BattleCore.setStartSpin(rec.battle, "villain", LaunchCore.effects(vq, L).spinFraction)
 	current = rec
 	removeFromQueue(player)
 	setBattleAttrs(player, "countdown", 0)
-	send(player, { kind = "countdown", seconds = B.Countdown, foe = V.Name, difficulty = difficulty })
+	local m = rec.meter
+	send(player, {
+		kind = "countdown",
+		seconds = B.Countdown,
+		foe = V.Name,
+		difficulty = difficulty,
+		meter = { start = m.start, finish = m.finish, period = m.period, zoneCenter = m.zoneCenter, greenHalf = m.greenHalf, yellowHalf = m.yellowHalf },
+	})
 end
 
 -- Applies a contact hit between the two beys.
@@ -2290,6 +2437,12 @@ local function step(dt)
 		return
 	end
 
+	-- Countdown over and the player never pressed LAUNCH: a weak launch.
+	if rec.battle.state == "countdown" and now - rec.battle.stateAt >= B.Countdown and not rec.launch.player then
+		rec.launch.player = { quality = L.NoPress, label = "TOO LATE" }
+		BattleCore.setStartSpin(rec.battle, "player", LaunchCore.effects(L.NoPress, L).spinFraction)
+	end
+
 	local events = BattleCore.update(rec.battle, now, dt)
 	for _, ev in ipairs(events) do
 		if ev.kind == "started" then
@@ -2297,8 +2450,24 @@ local function step(dt)
 			BeyService.release(player)
 			rec.villain.body.Anchored = false
 			rec.villain.body:SetNetworkOwner(nil)
+			-- LET IT RIP: the villain launches toward the player; the player's client launches its own bey.
+			local pl = rec.launch.player or { quality = L.NoPress, label = "TOO LATE" }
+			local vl = rec.launch.villain
+			local ve = LaunchCore.effects(vl.quality, L)
+			local toPlayer = rec.mine.body.Position - rec.villain.body.Position
+			toPlayer = Vector3.new(toPlayer.X, 0, toPlayer.Z)
+			if toPlayer.Magnitude > 0.1 then
+				rec.villain.body.AssemblyLinearVelocity = toPlayer.Unit * ve.speed
+			end
+			rec.ai:launched(ve.boost, now)
+			local pe = LaunchCore.effects(pl.quality, L)
 			setBattleAttrs(player, "active", Workspace:GetServerTimeNow() + B.Duration)
-			send(player, { kind = "started", duration = B.Duration })
+			send(player, {
+				kind = "started",
+				duration = B.Duration,
+				launch = { quality = pl.quality, label = pl.label, speed = pe.speed, boost = pe.boost, spin = pe.spinFraction },
+				foeLaunch = vl.label,
+			})
 		elseif ev.kind == "finished" then
 			finishBattle(rec, ev.result, now)
 		elseif ev.kind == "cleanup" then
@@ -2377,7 +2546,17 @@ function BattleService.start(r)
 		end
 		local rec = current
 		local mine = rec and rec.player == player
-		if req.action == "rematch" and mine and rec.battle.state == "finished" then
+		if req.action == "launch" and mine and rec.battle.state == "countdown" and not rec.launch.player then
+			-- One press per battle. The server judges where the needle was at the stamped time.
+			local t = LaunchCore.acceptPress(rec.meter, req.t, Workspace:GetServerTimeNow(), L)
+			local q, label = L.Miss, "WEAK"
+			if t then
+				q, label = LaunchCore.quality(rec.meter, LaunchCore.needle(rec.meter, t), L)
+			end
+			rec.launch.player = { quality = q, label = label }
+			BattleCore.setStartSpin(rec.battle, "player", LaunchCore.effects(q, L).spinFraction)
+			send(player, { kind = "launchLocked", label = label, quality = q })
+		elseif req.action == "rematch" and mine and rec.battle.state == "finished" then
 			BattleCore.requestCleanup(rec.battle, os.clock())
 			cleanup(rec, true)
 		elseif req.action == "leave" and mine and rec.battle.state == "finished" then
@@ -3235,6 +3414,7 @@ local Shared = ReplicatedStorage:WaitForChild("Spinforge")
 local BeyConfig = require(Shared.BeyConfig)
 local GameConfig = require(Shared.GameConfig)
 local MC = require(Shared.Core.MovementCore)
+local LaunchCore = require(Shared.Core.LaunchCore)
 
 local M = BeyConfig.Movement
 local VillainAI = {}
@@ -3292,6 +3472,13 @@ function VillainAI.new(rec, diff, center, ignore)
 	return self
 end
 
+-- The villain's launch boost (from its launch quality): extra top speed that fades over GameConfig.Launch.BoostTime.
+function VillainAI:launched(boost, now)
+	self.launchBoost = boost
+	self.launchAt = now
+	self.nextAttackAt = now + 1.0
+end
+
 function VillainAI:setTelegraph(kind)
 	if kind == nil then
 		self.highlight.Enabled = false
@@ -3328,6 +3515,9 @@ function VillainAI:step(dt, now, target, spinFraction, onSlamImpact)
 	local pos = body.Position
 	local vel = MC.sanitizeVelocity(body.AssemblyLinearVelocity, M)
 	local speed = MC.topSpeed(self.rec.stats, M) * self.diff.Speed
+	if self.launchAt then
+		speed *= LaunchCore.boostMultiplier(self.launchBoost, now - self.launchAt, GameConfig.Launch)
+	end
 
 	-- ground probe (same rules as the player: sphere probe, hysteresis)
 	local normal
@@ -3787,6 +3977,7 @@ local Shared = ReplicatedStorage:WaitForChild("Spinforge")
 local BeyConfig = require(Shared.BeyConfig)
 local GameConfig = require(Shared.GameConfig)
 local MC = require(Shared.Core.MovementCore)
+local LaunchCore = require(Shared.Core.LaunchCore)
 
 local M = BeyConfig.Movement
 local MAX_TILT = math.rad(M.MaxTiltDeg)
@@ -3810,6 +4001,8 @@ function Controller.start(ctx)
 	local ground, actions, stuck = MC.newGround(), MC.newActions(), MC.newStuck()
 	local jumpQueued, slamQueued = false, false
 	local pendingKnockback = Vector3.zero
+	local pendingLaunch = nil -- { speed, boost } from the server's "started" event
+	local launchBoost, launchAt = 0, -math.huge
 	local focus
 	local movedFor, fastAt = 0, -math.huge
 	local flipsAt, flipsRate, lastFlips = os.clock(), 0, 0
@@ -4000,6 +4193,7 @@ function Controller.start(ctx)
 		ground, actions, stuck = MC.newGround(), MC.newActions(), MC.newStuck()
 		clearInputs()
 		pendingKnockback = Vector3.zero
+		pendingLaunch, launchBoost, launchAt = nil, 0, -math.huge
 		local look = body.CFrame.LookVector
 		yaw = math.atan2(-look.X, -look.Z)
 		noseYaw, pitch, up, focus = yaw, 0, Vector3.yAxis, nil
@@ -4074,7 +4268,16 @@ function Controller.start(ctx)
 		if wish.Magnitude > 1 then
 			wish = wish.Unit
 		end
-		local speed = MC.topSpeed(stats(), M)
+		local speed = MC.topSpeed(stats(), M) * LaunchCore.boostMultiplier(launchBoost, now - launchAt, GameConfig.Launch)
+
+		-- LET IT RIP: shoot off the line where the camera is aiming.
+		if pendingLaunch then
+			local aim = Vector3.new(camera.CFrame.LookVector.X, 0, camera.CFrame.LookVector.Z)
+			aim = aim.Magnitude > 0.01 and aim.Unit or Vector3.new(-math.sin(yaw), 0, -math.cos(yaw))
+			vel = Vector3.new(aim.X * pendingLaunch.speed, vel.Y, aim.Z * pendingLaunch.speed)
+			launchBoost, launchAt = pendingLaunch.boost, now
+			pendingLaunch = nil
+		end
 
 		-- ground probe: a sphere cast (wider than a ray, so slab seams don't drop us), ray as fallback
 		local normal
@@ -4199,6 +4402,13 @@ function Controller.start(ctx)
 		camera.CFrame = CFrame.lookAt(wanted, focus) * effects:shakeOffset(dt)
 	end)
 
+	-- Called by Main when the battle starts. Applied on the first unfrozen frame.
+	function Controller.launch(speed, boost)
+		if body and MC.finite(speed) and MC.finite(boost) then
+			pendingLaunch = { speed = math.clamp(speed, 0, 120), boost = math.clamp(boost, 0, 1) }
+		end
+	end
+
 	function Controller.isBound()
 		return body ~= nil and body.Parent ~= nil
 	end
@@ -4234,6 +4444,8 @@ end
 function Controller.isBound()
 	return false
 end
+
+function Controller.launch() end
 
 return Controller
 ]=====])
@@ -4497,6 +4709,21 @@ function Hud.new(player)
 	self.resultClose = Ui.label(rp, { Position = UDim2.new(0, 0, 1, -18), Size = UDim2.new(1, 0, 0, 16), TextColor3 = C.muted, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Center, ZIndex = 11 })
 	self.resultFrame = rp
 
+	-- launch meter (during the countdown): a needle sweeps across; lock it in the green zone
+	local lm = Ui.panel(gui, { Name = "Launch", AnchorPoint = Vector2.new(0.5, 1), Position = UDim2.new(0.5, 0, 1, -70), Size = UDim2.fromOffset(460, 92), Visible = false, ZIndex = 8 })
+	Ui.pad(lm, 10)
+	self.launchTitle = Ui.label(lm, { Size = UDim2.new(1, 0, 0, 20), Font = Enum.Font.GothamBlack, TextSize = 18, TextXAlignment = Enum.TextXAlignment.Center, Text = "LAUNCH: stop the needle in the GREEN", ZIndex = 9 })
+	local track = Ui.make("Frame", { Position = UDim2.fromOffset(0, 28), Size = UDim2.new(1, 0, 0, 22), BackgroundColor3 = Color3.fromRGB(70, 30, 30), BorderSizePixel = 0, ZIndex = 9 }, lm)
+	Ui.corner(track, 6)
+	self.launchYellow = Ui.make("Frame", { AnchorPoint = Vector2.new(0.5, 0), Size = UDim2.fromScale(0.3, 1), BackgroundColor3 = C.warn, BorderSizePixel = 0, ZIndex = 10 }, track)
+	self.launchGreen = Ui.make("Frame", { AnchorPoint = Vector2.new(0.5, 0), Size = UDim2.fromScale(0.12, 1), BackgroundColor3 = C.good, BorderSizePixel = 0, ZIndex = 11 }, track)
+	self.launchNeedle = Ui.make("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0, 0.5), Size = UDim2.new(0, 6, 1, 12), BackgroundColor3 = C.text, BorderSizePixel = 0, ZIndex = 12 }, track)
+	Ui.corner(self.launchNeedle, 3)
+	self.launchHint = Ui.label(lm, { Position = UDim2.fromOffset(0, 56), Size = UDim2.new(1, 0, 0, 18), TextSize = 14, TextColor3 = C.muted, TextXAlignment = Enum.TextXAlignment.Center, ZIndex = 9 })
+	self.launchFrame = lm
+	self.touchLaunch = Ui.button(gui, "LAUNCH", { AnchorPoint = Vector2.new(1, 1), Position = UDim2.new(1, -24, 1, -150), Size = UDim2.fromOffset(120, 120), BackgroundColor3 = Color3.fromRGB(40, 130, 70), TextSize = 22, Visible = false, ZIndex = 9 })
+	Ui.corner(self.touchLaunch, 60)
+
 	-- toasts (top centre, under the battle bar)
 	self.toastLabel = Ui.label(gui, {
 		AnchorPoint = Vector2.new(0.5, 0),
@@ -4613,11 +4840,66 @@ function Hud:countdown(seconds, foe, difficulty)
 	end)
 end
 
-function Hud:started()
+local LAUNCH_COLOR = { PERFECT = C.good, GOOD = C.warn, WEAK = C.bad, ["TOO LATE"] = C.bad }
+
+-- Shows the launch meter for this battle. meter: positions as shares of the bar (see Core/LaunchCore).
+function Hud:showLaunch(meter)
+	self.launchMeter = meter
+	self.launchLocked = false
+	self.launchGreen.Position = UDim2.fromScale(meter.zoneCenter, 0)
+	self.launchGreen.Size = UDim2.fromScale(meter.greenHalf * 2, 1)
+	self.launchYellow.Position = UDim2.fromScale(meter.zoneCenter, 0)
+	self.launchYellow.Size = UDim2.fromScale(meter.yellowHalf * 2, 1)
+	self.launchTitle.Text = "LAUNCH: stop the needle in the GREEN"
+	self.launchTitle.TextColor3 = C.text
+	local touch = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+	local pad = UserInputService.GamepadEnabled
+	self.launchHint.Text = touch and "Tap LAUNCH" or pad and "Press A" or "Press SPACE or click"
+	self.launchFrame.Visible = true
+	self.touchLaunch.Visible = UserInputService.TouchEnabled
+	self.touchSlam.Visible = false
+end
+
+-- Moves the needle (pos 0..1) until it is locked.
+function Hud:setNeedle(pos)
+	if not self.launchLocked then
+		self.launchNeedle.Position = UDim2.fromScale(math.clamp(pos, 0, 1), 0.5)
+	end
+end
+
+function Hud:lockLaunch(pos, label)
+	self.launchLocked = true
+	if pos then
+		self.launchNeedle.Position = UDim2.fromScale(math.clamp(pos, 0, 1), 0.5)
+	end
+	self.launchTitle.Text = label .. "!"
+	self.launchTitle.TextColor3 = LAUNCH_COLOR[label] or C.text
+	self.touchLaunch.Visible = false
+end
+
+function Hud:hideLaunch()
+	self.launchFrame.Visible = false
+	self.touchLaunch.Visible = false
+	self.launchMeter = nil
+	self.touchSlam.Visible = self.touchButtonsShown == true and UserInputService.TouchEnabled
+end
+
+-- "LET IT RIP!" plus how good the launch was and what it gave you.
+function Hud:started(launch, foeLaunch)
+	self:hideLaunch()
 	self.center.TextColor3 = C.good
-	self.center.Text = "GO!"
-	task.delay(0.8, function()
-		if self.center.Text == "GO!" then
+	self.center.Text = "LET IT RIP!"
+	if launch then
+		local pct = math.floor((launch.spin or 1) * 100 + 0.5)
+		self:toast(("%s launch: %d%% spin, +%d%% speed boost%s"):format(
+			launch.label == "TOO LATE" and "Late" or (launch.label:sub(1, 1) .. launch.label:sub(2):lower()),
+			pct,
+			math.floor((launch.boost or 0) * 100 + 0.5),
+			foeLaunch and ("   ·   Rival: " .. foeLaunch:lower()) or ""
+		), LAUNCH_COLOR[launch.label])
+	end
+	task.delay(1, function()
+		if self.center.Text == "LET IT RIP!" then
 			self.center.Text = ""
 		end
 	end)
@@ -4723,6 +5005,7 @@ function Hud:showResult(e, onRematch, onLeave)
 end
 
 function Hud:closeBattle()
+	self:hideLaunch()
 	if self.resultFrame.Visible then
 		self.resultFrame.Visible = false
 		self:_panel(false)
@@ -4775,7 +5058,9 @@ end
 
 function Hud:showTouchButtons(show)
 	local touch = UserInputService.TouchEnabled
-	self.touchSlam.Visible = show and touch
+	self.touchButtonsShown = show
+	-- SLAM shares its spot with LAUNCH, so it waits until the launch meter is gone.
+	self.touchSlam.Visible = show and touch and not self.launchMeter
 	self.touchJump.Visible = show and touch
 end
 
@@ -4833,6 +5118,8 @@ local Effects = require(script.Parent.Effects)
 local Menus = require(script.Parent.Menus)
 local Tutorial = require(script.Parent.Tutorial)
 local Controller = require(script.Parent.Controller)
+local LaunchCore = require(Shared.Core.LaunchCore)
+local GameConfig = require(Shared.GameConfig)
 
 local profile = nil
 local function settings()
@@ -4896,8 +5183,17 @@ remotes.BattleEvent.OnClientEvent:Connect(function(e)
 		inBattle = true
 		hud:closeBattle()
 		hud:countdown(e.seconds or 3, e.foe, e.difficulty)
+		if type(e.meter) == "table" then
+			hud:showLaunch(e.meter)
+		end
+	elseif e.kind == "launchLocked" then
+		-- the server's verdict (normally the same as what we showed)
+		hud:lockLaunch(nil, e.label or "WEAK")
 	elseif e.kind == "started" then
-		hud:started()
+		hud:started(e.launch, e.foeLaunch)
+		if type(e.launch) == "table" then
+			Controller.launch(e.launch.speed, e.launch.boost)
+		end
 	elseif e.kind == "hit" then
 		if (e.taken or 0) > 0.5 then
 			hud:popup(("-%d"):format(math.floor(e.taken + 0.5)), Color3.fromRGB(255, 110, 110), false)
@@ -4929,6 +5225,35 @@ remotes.BattleEvent.OnClientEvent:Connect(function(e)
 		hud:closeBattle()
 	elseif e.kind == "openWorkshop" then
 		menus:open()
+	end
+end)
+
+-- Launch meter: the needle runs on the shared server clock; one press locks it and tells the server when.
+local function pressLaunch()
+	local meter = hud.launchMeter
+	if not meter or hud.launchLocked then
+		return
+	end
+	local t = Workspace:GetServerTimeNow()
+	local pos = LaunchCore.needle(meter, t)
+	local _, label = LaunchCore.quality(meter, pos, GameConfig.Launch)
+	hud:lockLaunch(pos, label)
+	remotes.Request:FireServer({ action = "launch", t = t })
+end
+UserInputService.InputBegan:Connect(function(input, processed)
+	if processed or not hud.launchMeter then
+		return
+	end
+	local kc = input.KeyCode
+	if kc == Enum.KeyCode.Space or kc == Enum.KeyCode.ButtonA or kc == Enum.KeyCode.ButtonR2 or input.UserInputType == Enum.UserInputType.MouseButton1 then
+		pressLaunch()
+	end
+end)
+hud.touchLaunch.Activated:Connect(pressLaunch)
+RunService.RenderStepped:Connect(function()
+	local meter = hud.launchMeter
+	if meter and not hud.launchLocked then
+		hud:setNeedle(LaunchCore.needle(meter, Workspace:GetServerTimeNow()))
 	end
 end)
 
@@ -5511,4 +5836,4 @@ end
 
 return Ui
 ]=====])
-print('Spinforge installed: 28 scripts. Press Play.')
+print('Spinforge installed: 29 scripts. Press Play.')

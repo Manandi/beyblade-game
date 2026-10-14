@@ -85,6 +85,19 @@ keeps `ReplicatedStorage.BeyMeshes`, so your imported meshes survive. Running it
   - Studio reuses one session-lock id, so a stopped test run doesn't lock saving for 10 minutes.
   - A queued player who went off to practice gets a message instead of being silently dropped.
 
+- **Skill launch ("3, 2, 1, LET IT RIP!")** (owner request, after the night's work):
+  - During the countdown a needle sweeps across a launch bar. Press once (Space / click / A / LAUNCH on touch) to
+    lock it: green = PERFECT, yellow = GOOD, elsewhere or no press = weak.
+  - The green zone moves every battle.
+  - Quality sets three things:
+    - **starting spin** (stamina): 100% at perfect, about 77% if you never press, 70% at worst
+    - **launch speed** off the line, toward where the camera aims (18 to 75 studs/s)
+    - a **speed boost** of up to +35%, fading over 4 s
+  - The server judges the timing from the press time (stamps more than 0.6 s stale or in the future are rejected),
+    and only one press counts.
+  - The villain launches too, with skill set by difficulty (Easy 0.5, Normal 0.72, Hard 0.92, plus a little noise).
+  - Tuning is in `GameConfig.Launch`; rules in `Core/LaunchCore.lua` (`launch.test.luau`).
+
 ## Tests: commands and actual results
 
 ```
@@ -141,7 +154,9 @@ Note the result of each step (✓ / ✗ + a screenshot of anything red in Output
    dummy (click in the air): it should get knocked away.
 7. **Back to hub** (Q). Is the avatar back on the pad, walking, with the normal camera? Try walking into the arena
    bowl on foot: an invisible wall should stop you at the rim.
-8. **Villain fight** (red pedestal). Countdown 3-2-1, then GO.
+8. **Villain fight** (red pedestal). Countdown 3-2-1 with the launch bar: press Space when the needle is in the
+   green. Does it say PERFECT, and do you shoot off the line where you're aiming? Try a fight without pressing
+   (TOO LATE, less spin).
    - Rook shows a red "!" before dashing and an orange "!!" before jumping.
    - Hit it: your number pops on its bar. Get hit: red flash.
    - LOW SPIN warns near the end.
@@ -164,6 +179,7 @@ Note the result of each step (✓ / ✗ + a screenshot of anything red in Output
 |---|---|---|---|
 | Drive | WASD | Left stick | Drag on the left half (or Roblox's thumbstick) |
 | Tilt (down = lean in, up = brake) | Mouse | Right stick | Drag on the right half |
+| Launch (during 3-2-1) | Space or click | A or right trigger | LAUNCH button |
 | Jump | Space | A | JUMP button |
 | Slam (in the air) | Left click | Right trigger | SLAM button |
 | Challenge / Practice / Workshop | Hold E at the prompt | Prompt button (X) | Tap the prompt |

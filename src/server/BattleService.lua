@@ -3,7 +3,8 @@
 --   Challenge prompt -> (queue if the arena is busy) -> countdown (both beys frozen) -> active -> finished
 --   -> result screen (Rematch / Leave, or it closes itself) -> cleanup (beys removed, avatar restored)
 -- What the server trusts from the client: only the player's bey position/velocity (client-owned physics, which a
--- cheater could fake) and a bare "my slam landed" signal, which is checked against the fall the server observed.
+-- cheater could fake), a bare "my slam landed" signal (checked against the fall the server observed), and the time
+-- the player pressed LAUNCH (checked against the meter's window; the server judges the timing itself).
 -- Clients never send damage, results, XP or Shards. See HANDOFF.md "Residual exploit exposure".
 
 local Players = game:GetService("Players")
@@ -17,6 +18,7 @@ local GameConfig = require(Shared.GameConfig)
 local CombatCore = require(Shared.Core.CombatCore)
 local BattleCore = require(Shared.Core.BattleCore)
 local Progression = require(Shared.Core.Progression)
+local LaunchCore = require(Shared.Core.LaunchCore)
 
 local BeyFactory = require(script.Parent.BeyFactory)
 local BeyService = require(script.Parent.BeyService)
@@ -24,7 +26,7 @@ local DataService = require(script.Parent.DataService)
 local VillainAI = require(script.Parent.VillainAI)
 local World = require(script.Parent.World)
 
-local C, B, V, P = GameConfig.Combat, GameConfig.Battle, GameConfig.Villain, GameConfig.Progression
+local C, B, V, P, L = GameConfig.Combat, GameConfig.Battle, GameConfig.Villain, GameConfig.Progression, GameConfig.Launch
 
 local BattleService = {}
 
@@ -196,16 +198,30 @@ startBattle = function(player)
 		villainFall = CombatCore.newFallTracker(),
 		outTimers = {},
 		startedAt = nil,
+		-- Skill launch: the meter runs on the shared server clock during the countdown.
+		meter = LaunchCore.newMeter(Workspace:GetServerTimeNow(), B.Countdown, Random.new():NextNumber(), L),
+		launch = {}, -- side -> { quality, label }
 	}
 	rec.battle = BattleCore.new(rec.id, {
 		{ key = "player", maxSpin = mine.maxSpin, drain = CombatCore.drainPerSecond(mine.stats, C) },
 		{ key = "villain", maxSpin = villain.maxSpin, drain = CombatCore.drainPerSecond(villain.stats, C) },
 	}, B, now)
 	rec.ai = VillainAI.new(villain, diff, center, { BeyService.folder() })
+	-- The villain's launch is decided now (its skill depends on difficulty).
+	local vq = LaunchCore.villainQuality(diff.Launch or 0.7, Random.new():NextNumber())
+	rec.launch.villain = { quality = vq, label = vq >= 0.95 and "PERFECT" or vq >= L.Good and "GOOD" or "WEAK" }
+	BattleCore.setStartSpin(rec.battle, "villain", LaunchCore.effects(vq, L).spinFraction)
 	current = rec
 	removeFromQueue(player)
 	setBattleAttrs(player, "countdown", 0)
-	send(player, { kind = "countdown", seconds = B.Countdown, foe = V.Name, difficulty = difficulty })
+	local m = rec.meter
+	send(player, {
+		kind = "countdown",
+		seconds = B.Countdown,
+		foe = V.Name,
+		difficulty = difficulty,
+		meter = { start = m.start, finish = m.finish, period = m.period, zoneCenter = m.zoneCenter, greenHalf = m.greenHalf, yellowHalf = m.yellowHalf },
+	})
 end
 
 -- Applies a contact hit between the two beys.
@@ -280,6 +296,12 @@ local function step(dt)
 		return
 	end
 
+	-- Countdown over and the player never pressed LAUNCH: a weak launch.
+	if rec.battle.state == "countdown" and now - rec.battle.stateAt >= B.Countdown and not rec.launch.player then
+		rec.launch.player = { quality = L.NoPress, label = "TOO LATE" }
+		BattleCore.setStartSpin(rec.battle, "player", LaunchCore.effects(L.NoPress, L).spinFraction)
+	end
+
 	local events = BattleCore.update(rec.battle, now, dt)
 	for _, ev in ipairs(events) do
 		if ev.kind == "started" then
@@ -287,8 +309,24 @@ local function step(dt)
 			BeyService.release(player)
 			rec.villain.body.Anchored = false
 			rec.villain.body:SetNetworkOwner(nil)
+			-- LET IT RIP: the villain launches toward the player; the player's client launches its own bey.
+			local pl = rec.launch.player or { quality = L.NoPress, label = "TOO LATE" }
+			local vl = rec.launch.villain
+			local ve = LaunchCore.effects(vl.quality, L)
+			local toPlayer = rec.mine.body.Position - rec.villain.body.Position
+			toPlayer = Vector3.new(toPlayer.X, 0, toPlayer.Z)
+			if toPlayer.Magnitude > 0.1 then
+				rec.villain.body.AssemblyLinearVelocity = toPlayer.Unit * ve.speed
+			end
+			rec.ai:launched(ve.boost, now)
+			local pe = LaunchCore.effects(pl.quality, L)
 			setBattleAttrs(player, "active", Workspace:GetServerTimeNow() + B.Duration)
-			send(player, { kind = "started", duration = B.Duration })
+			send(player, {
+				kind = "started",
+				duration = B.Duration,
+				launch = { quality = pl.quality, label = pl.label, speed = pe.speed, boost = pe.boost, spin = pe.spinFraction },
+				foeLaunch = vl.label,
+			})
 		elseif ev.kind == "finished" then
 			finishBattle(rec, ev.result, now)
 		elseif ev.kind == "cleanup" then
@@ -367,7 +405,17 @@ function BattleService.start(r)
 		end
 		local rec = current
 		local mine = rec and rec.player == player
-		if req.action == "rematch" and mine and rec.battle.state == "finished" then
+		if req.action == "launch" and mine and rec.battle.state == "countdown" and not rec.launch.player then
+			-- One press per battle. The server judges where the needle was at the stamped time.
+			local t = LaunchCore.acceptPress(rec.meter, req.t, Workspace:GetServerTimeNow(), L)
+			local q, label = L.Miss, "WEAK"
+			if t then
+				q, label = LaunchCore.quality(rec.meter, LaunchCore.needle(rec.meter, t), L)
+			end
+			rec.launch.player = { quality = q, label = label }
+			BattleCore.setStartSpin(rec.battle, "player", LaunchCore.effects(q, L).spinFraction)
+			send(player, { kind = "launchLocked", label = label, quality = q })
+		elseif req.action == "rematch" and mine and rec.battle.state == "finished" then
 			BattleCore.requestCleanup(rec.battle, os.clock())
 			cleanup(rec, true)
 		elseif req.action == "leave" and mine and rec.battle.state == "finished" then

@@ -112,6 +112,17 @@ function BattleCore.update(b, now, dt)
 	return events
 end
 
+-- The launch sets how much spin a side starts with (fraction of max). Only during the countdown, only once.
+function BattleCore.setStartSpin(b, key, fraction)
+	local s = b.sides[key]
+	if b.state ~= "countdown" or not s or s.launched or not finite(fraction) then
+		return false
+	end
+	s.spin = s.maxSpin * math.clamp(fraction, 0.05, 1)
+	s.launched = true
+	return true
+end
+
 -- Apply damage to a side. Ignored unless active; never negative or non-finite. Returns the amount applied.
 function BattleCore.damage(b, key, amount)
 	local s = b.sides[key]

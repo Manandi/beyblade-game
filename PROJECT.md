@@ -39,6 +39,7 @@ See [HANDOFF.md](HANDOFF.md) for the full change log, test results, Studio check
 |---|---|
 | `src/shared/Core/MovementCore.lua` | Movement rules shared by the player and the villain: ground hysteresis, one takeoff boost per takeoff, slam state, jump cooldown, slope traction, lean/brake, sanitising, facing, recovery. |
 | `src/shared/Core/CombatCore.lua` | Spin pools and drain, stat roles, bounded hit damage and knockback, contact de-duplication, slam checks against server-observed falls, ring-out with grace, rate limits. |
+| `src/shared/Core/LaunchCore.lua` | The 3-2-1 skill launch: needle, green/yellow zones, press validation, quality → starting spin, launch speed, speed boost. |
 | `src/shared/Core/BattleCore.lua` | Battle lifecycle: countdown → active → finished (once) → cleanup; outcomes; rewards claimable once. |
 | `src/shared/Core/Progression.lua`, `PlayerData.lua`, `SessionStore.lua` | XP, Shards, Workshop, equip rules; versioned save format with migration and repair; session-locked load/save that never overwrites a real save after a failed load. |
 | `src/shared/BeyConfig.lua`, `GameConfig.lua` | All tuning: parts, crate odds, movement; combat, battle, villain, difficulty, progression, saving. |
@@ -93,6 +94,10 @@ See [HANDOFF.md](HANDOFF.md) for the full change log, test results, Studio check
   explicit slam state; nose-up now really stops you), server-owned spin/combat/outcomes/rewards, Rook the Grinder with
   telegraphed attacks, hub + practice + arena (no fence = ring-outs), Workshop progression, session-locked saving, new HUD,
   tutorial, settings, backup on-foot controls. Not yet run in Studio.
+
+- **2026-10-14, skill launch:** owner asked for a "3, 2, 1, let it rip" timing launch. Built: a launch bar during the
+  countdown; timing sets starting spin, launch speed and a short speed boost; server-judged; villain launches by
+  difficulty. Not yet run in Studio.
 
 ### Status
 
