@@ -245,7 +245,11 @@ function BeyService.start(r, dataService, onSlam)
 	BeyService.toHubIfLost = toHubIfLost
 
 	local function hookCharacter(player)
-		player.CharacterAdded:Connect(function()
+		if player.Character then
+			World.tagCharacter(player.Character)
+		end
+		player.CharacterAdded:Connect(function(char)
+			World.tagCharacter(char)
 			-- A reset or respawn while in bey mode: end it cleanly (BattleService treats it as leaving).
 			if BeyService.mode(player) ~= "OnFoot" then
 				BeyService.onInterrupted(player)

@@ -30,6 +30,8 @@ T.test("server starts without errors and builds the world", function()
 	T.ok(world:FindFirstChild("Arena") and world:FindFirstChild("Training") and world:FindFirstChild("Hub"))
 	T.ok(world:FindFirstChild("ChallengePrompt", true), "challenge prompt")
 	T.ok(RS:FindFirstChild("SpinforgeRemotes"), "remotes")
+	T.eq(Mock.collision.pairs["SpinforgeAvatarWall|Default"], false, "walls ignore beys")
+	T.eq(Mock.collision.pairs["SpinforgeAvatarWall|SpinforgeAvatars"], true, "walls block avatars")
 	local ready = false
 	for _, line in ipairs(Mock.printed) do
 		if line:find("Spinforge server ready") then
@@ -51,6 +53,7 @@ T.test("player data loads and the client starts", function()
 	T.eq(alice:GetAttribute("DataReady"), true)
 	T.eq(alice:GetAttribute("Mode"), "OnFoot")
 	T.ok(#Mock.sentTo(alice, "Profile") >= 1, "profile sent")
+	T.eq(alice.Character.HumanoidRootPart.CollisionGroup, "SpinforgeAvatars", "avatar in its collision group")
 	T.ok(alice.PlayerGui:FindFirstChild("SpinforgeHud"), "hud")
 end)
 

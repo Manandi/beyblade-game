@@ -63,7 +63,9 @@ local P = GameConfig.Progression
 local profiles = {} -- player -> { data, status, dirty }
 local remotes
 local onReady = {} -- callbacks(player)
-local jobId = (game.JobId ~= "" and game.JobId) or ("studio-" .. tostring(math.random(1, 1e9)))
+-- Studio has no JobId. Use one fixed id there, so a lock left behind by a stopped test session is picked straight
+-- back up by the next one instead of locking you out of saving for LockTimeout.
+local jobId = (game.JobId ~= "" and game.JobId) or "studio"
 
 -- Adapter: SessionStore's store:update contract over a DataStore.
 local function makeAdapter(ds)
@@ -752,7 +754,9 @@ World.ARENA_CENTER = Vector3.new(0, 0, 0)
 World.TRAINING_CENTER = Vector3.new(0, 0, -130)
 World.HUB_CENTER = Vector3.new(0, 0, 95)
 World.SPAWN = Vector3.new(0, 3, 108)
-World.PARK = Vector3.new(0, 4, 128) -- where avatars wait (anchored) while their bey plays
+World.PARK = Vector3.new(28, 4, 130) -- where avatars wait (anchored) while their bey plays, away from the prompts
+World.AVATAR_GROUP = "SpinforgeAvatars"
+World.AVATAR_WALL_GROUP = "SpinforgeAvatarWall"
 
 local SEGMENTS = 48
 local FLOOR_RADIUS = 14
@@ -847,6 +851,16 @@ local function buildBowl(root, opts)
 		end
 	end
 
+	-- Avatar-only wall: keeps people on foot out of the bowl (so nobody can wander in and block a battle).
+	-- It doesn't collide with beys, so launches and ring-outs are unaffected.
+	for i = 0, SEGMENTS - 1 do
+		local angle = i * 2 * math.pi / SEGMENTS
+		local width = 2 * (inner + 3) * math.tan(math.pi / SEGMENTS) + 0.3
+		local wall = block(barrier, "AvatarWall", Vector3.new(width, 50, 1), origin * CFrame.new(0, 25, 0) * CFrame.Angles(0, angle, 0) * CFrame.new(0, 0, -(inner + 3)), Color3.new(1, 1, 1))
+		wall.Transparency = 1
+		wall.CollisionGroup = World.AVATAR_WALL_GROUP
+	end
+
 	if opts.dummies then
 		for _, xz in ipairs({ { 9, 0 }, { -5, 8 }, { -5, -8 } }) do
 			local p = Instance.new("Part")
@@ -933,8 +947,34 @@ function World.polishLighting()
 	end
 end
 
+-- Collision groups: the avatar-only walls collide with avatars and nothing else.
+function World.setupCollisionGroups()
+	local PhysicsService = game:GetService("PhysicsService")
+	for _, name in ipairs({ World.AVATAR_GROUP, World.AVATAR_WALL_GROUP }) do
+		pcall(function()
+			PhysicsService:RegisterCollisionGroup(name)
+		end)
+	end
+	PhysicsService:CollisionGroupSetCollidable(World.AVATAR_WALL_GROUP, "Default", false)
+	PhysicsService:CollisionGroupSetCollidable(World.AVATAR_WALL_GROUP, World.AVATAR_GROUP, true)
+end
+
+-- Puts every part of a character in the avatar group (and any part added later, e.g. accessories).
+function World.tagCharacter(char)
+	local function tag(d)
+		if d:IsA("BasePart") then
+			d.CollisionGroup = World.AVATAR_GROUP
+		end
+	end
+	for _, d in ipairs(char:GetDescendants()) do
+		tag(d)
+	end
+	char.DescendantAdded:Connect(tag)
+end
+
 -- Returns { root, arena, training, prompts, built = bool }.
 function World.build(villainName)
+	World.setupCollisionGroups()
 	local existing = Workspace:FindFirstChild("SpinforgeWorld")
 	if existing then
 		local prompts = {}

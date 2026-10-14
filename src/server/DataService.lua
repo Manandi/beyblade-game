@@ -29,7 +29,9 @@ local P = GameConfig.Progression
 local profiles = {} -- player -> { data, status, dirty }
 local remotes
 local onReady = {} -- callbacks(player)
-local jobId = (game.JobId ~= "" and game.JobId) or ("studio-" .. tostring(math.random(1, 1e9)))
+-- Studio has no JobId. Use one fixed id there, so a lock left behind by a stopped test session is picked straight
+-- back up by the next one instead of locking you out of saving for LockTimeout.
+local jobId = (game.JobId ~= "" and game.JobId) or "studio"
 
 -- Adapter: SessionStore's store:update contract over a DataStore.
 local function makeAdapter(ds)

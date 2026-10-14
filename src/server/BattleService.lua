@@ -101,6 +101,8 @@ local function cleanup(rec, rematch)
 		local nextPlayer = table.remove(queue, 1)
 		if nextPlayer.Parent and BeyService.mode(nextPlayer) == "OnFoot" then
 			startBattle(nextPlayer)
+		elseif nextPlayer.Parent then
+			remotes.Toast:FireClient(nextPlayer, "Your turn in the arena came up while you were practicing. Challenge again when you're ready.")
 		end
 	end
 	for i, p in ipairs(queue) do

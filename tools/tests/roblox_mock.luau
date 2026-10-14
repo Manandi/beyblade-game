@@ -576,7 +576,7 @@ function Mock.reset()
 	game.JobId = ""
 	game.PlaceId = 0
 	local services = {}
-	for _, n in ipairs({ "Workspace", "Players", "ReplicatedStorage", "ServerScriptService", "StarterPlayer", "RunService", "HttpService", "CollectionService", "DataStoreService", "TweenService", "UserInputService", "GuiService", "Lighting" }) do
+	for _, n in ipairs({ "Workspace", "Players", "ReplicatedStorage", "ServerScriptService", "StarterPlayer", "RunService", "HttpService", "CollectionService", "DataStoreService", "TweenService", "UserInputService", "GuiService", "Lighting", "PhysicsService" }) do
 		services[n] = service(n == "Workspace" and "Workspace" or n, n)
 		services[n].Parent = game
 	end
@@ -593,6 +593,13 @@ function Mock.reset()
 	end
 	Mock.closeHandlers = {}
 
+	Mock.collision = { groups = {}, pairs = {} }
+	services.PhysicsService.RegisterCollisionGroup = function(_, name) Mock.collision.groups[name] = true end
+	services.PhysicsService.CollisionGroupSetCollidable = function(_, a, b, v)
+		assert(a == "Default" or Mock.collision.groups[a], "unregistered collision group " .. a)
+		assert(b == "Default" or Mock.collision.groups[b], "unregistered collision group " .. b)
+		Mock.collision.pairs[a .. "|" .. b] = v
+	end
 	services.Lighting.EnvironmentSpecularScale = 0
 	services.Lighting.EnvironmentDiffuseScale = 0
 

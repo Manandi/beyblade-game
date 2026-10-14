@@ -78,6 +78,13 @@ keeps `ReplicatedStorage.BeyMeshes`, so your imported meshes survive. Running it
   - Characters that spawn outside the hub (e.g. a template spawn inside a stadium) are moved to the hub.
   - Light lighting polish (bloom and specular), only added if the place has none.
 
+- **Late review fixes:**
+  - An avatar-only invisible wall around each bowl (collision groups) stops people on foot from walking into the
+    arena and blocking a battle. Beys pass through it, so ring-outs still work.
+  - Parked avatars now wait away from the hub prompts.
+  - Studio reuses one session-lock id, so a stopped test run doesn't lock saving for 10 minutes.
+  - A queued player who went off to practice gets a message instead of being silently dropped.
+
 ## Tests: commands and actual results
 
 ```
@@ -132,7 +139,8 @@ Note the result of each step (✓ / ✗ + a screenshot of anything red in Output
    clearly on the floor? Does flips/s stay near 0?
 6. **Launch.** Ride up the wall, nose up at the lip, and fly. Does the fence catch you? Land a **slam** near a red
    dummy (click in the air): it should get knocked away.
-7. **Back to hub** (Q). Is the avatar back on the pad, walking, with the normal camera?
+7. **Back to hub** (Q). Is the avatar back on the pad, walking, with the normal camera? Try walking into the arena
+   bowl on foot: an invisible wall should stop you at the rim.
 8. **Villain fight** (red pedestal). Countdown 3-2-1, then GO.
    - Rook shows a red "!" before dashing and an orange "!!" before jumping.
    - Hit it: your number pops on its bar. Get hit: red flash.
