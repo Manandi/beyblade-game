@@ -36,7 +36,7 @@ After the meshes are regenerated (`tools/blender/build_beys.py`), delete the thr
 | Input | Action |
 |---|---|
 | WASD / left thumbstick | Move (relative to the camera) |
-| Mouse / touch drag / right stick | Turn and **tilt** the bey |
+| Mouse / touch drag / right stick | Turn, and **tilt**: mouse down = lean in (faster), mouse up = brake; nose up off the lip = higher launch |
 | Space / jump button | Jump |
 | Click / SLAM button / right trigger | Dive-slam (in the air) |
 | R | Reset the bey |

@@ -526,11 +526,18 @@ def main():
         if o.type == "MESH" and o is not floor:
             o.hide_render = True
     floor.location.z = -1.47
-    for k, ids in enumerate(combos):
-        for pid in ids:
+    def span(pid):
+        zs = [v.co.z for o in objs[pid].values() for v in o.data.vertices]
+        return min(zs), max(zs)
+
+    for k, (layer, disc, driver) in enumerate(combos):
+        # Stack flush exactly like BeyVisuals does in game: layer on the wheel's top, driver under its bottom.
+        d_bot, d_top = span(disc)
+        lifts = {disc: 0.0, layer: d_top - 0.02 - span(layer)[0], driver: d_bot + 0.02 - span(driver)[1]}
+        for pid, lift in lifts.items():
             for o in objs[pid].values():
                 o.hide_render = False
-                o.location = (k * 5.2, 0, 0)
+                o.location = (k * 5.2, 0, lift)
     render(os.path.join(previews, "assembled.png"), (7.8, -21, 8), (7.8, 0, -0.2), (1800, 700), lens=36)
     print("done")
 

@@ -190,7 +190,7 @@ local function findMesh(name)
 end
 
 -- Clones a mesh, resizes it to the size Blender recorded (so the import scale doesn't matter) and welds it on.
-local function addMesh(ctx, template, data, color, material)
+local function addMesh(ctx, template, data, color, material, lift)
 	local p = template:Clone()
 	for _, child in ipairs(p:GetChildren()) do
 		child:Destroy() -- drop anything the importer attached (SurfaceAppearance, welds)
@@ -206,7 +206,7 @@ local function addMesh(ctx, template, data, color, material)
 	p.Color = color
 	p.Material = material
 	p.Size = data.Size
-	p.CFrame = ctx.root * CFrame.new(0, Y_OFFSET, 0) * CFrame.new(data.Center)
+	p.CFrame = ctx.root * CFrame.new(0, Y_OFFSET + lift, 0) * CFrame.new(data.Center)
 	p.Parent = ctx.parent
 	local weld = Instance.new("WeldConstraint")
 	weld.Part0 = ctx.hub
@@ -215,15 +215,27 @@ local function addMesh(ctx, template, data, color, material)
 end
 
 -- Uses the part's two meshes if both are imported; returns false so the caller can fall back.
-local function tryMeshes(ctx, id, slot, design)
+-- Lowest and highest point of a part's two meshes (bey-local studs), or nil if it has no mesh data.
+local function meshSpan(id)
+	local p, a = BeyMeshData[id .. "_P"], BeyMeshData[id .. "_A"]
+	if not (p and a) then
+		return nil
+	end
+	local bottom = math.min(p.Center.Y - p.Size.Y / 2, a.Center.Y - a.Size.Y / 2)
+	local top = math.max(p.Center.Y + p.Size.Y / 2, a.Center.Y + a.Size.Y / 2)
+	return bottom, top
+end
+
+-- lift: how far to move the part up or down so it sits flush on the parts next to it.
+local function tryMeshes(ctx, id, slot, design, lift)
 	local primary, accent = findMesh(id .. "_P"), findMesh(id .. "_A")
 	if not (primary and accent) then
 		return false
 	end
 	local rank = rarityRank(BeyConfig.Parts[id].Rarity)
 	local body = slot == "Disc" and Enum.Material.Metal or Enum.Material.SmoothPlastic
-	addMesh(ctx, primary, BeyMeshData[id .. "_P"], design.Primary, body)
-	addMesh(ctx, accent, BeyMeshData[id .. "_A"], design.Accent, rank >= rarityRank("Legendary") and Enum.Material.Neon or Enum.Material.SmoothPlastic)
+	addMesh(ctx, primary, BeyMeshData[id .. "_P"], design.Primary, body, lift)
+	addMesh(ctx, accent, BeyMeshData[id .. "_A"], design.Accent, rank >= rarityRank("Legendary") and Enum.Material.Neon or Enum.Material.SmoothPlastic, lift)
 	return true
 end
 
@@ -231,13 +243,25 @@ function BeyVisuals.Attach(hub, root, partIds, parent)
 	local ctx = { hub = hub, root = root, parent = parent or hub.Parent }
 	local layer, disc, driver = BeyDesigns.Parts[partIds.Layer], BeyDesigns.Parts[partIds.Disc], BeyDesigns.Parts[partIds.Driver]
 	assert(layer and disc and driver, "missing design for a part")
-	if not tryMeshes(ctx, partIds.Disc, "Disc", disc) then
+	-- Stack the parts flush: the wheel stays put, the layer sits on the wheel's top face and the driver hangs
+	-- from its bottom face. Wheels differ in thickness, so fixed heights would leave gaps. A small overlap hides seams.
+	local OVERLAP = 0.02
+	local discBottom, discTop = meshSpan(partIds.Disc)
+	if not (discBottom and findMesh(partIds.Disc .. "_P")) then
+		discBottom, discTop = -0.35, 0.35 -- the block-built fallback wheel
+	end
+	local layerBottom = meshSpan(partIds.Layer)
+	local _, driverTop = meshSpan(partIds.Driver)
+	local layerLift = layerBottom and (discTop - OVERLAP - layerBottom) or 0
+	local driverLift = driverTop and (discBottom + OVERLAP - driverTop) or 0
+
+	if not tryMeshes(ctx, partIds.Disc, "Disc", disc, 0) then
 		buildDisc(ctx, disc)
 	end
-	if not tryMeshes(ctx, partIds.Driver, "Driver", driver) then
+	if not tryMeshes(ctx, partIds.Driver, "Driver", driver, driverLift) then
 		buildDriver(ctx, driver)
 	end
-	local layerMeshed = tryMeshes(ctx, partIds.Layer, "Layer", layer)
+	local layerMeshed = tryMeshes(ctx, partIds.Layer, "Layer", layer, layerLift)
 	if not layerMeshed then
 		buildLayer(ctx, layer)
 	end

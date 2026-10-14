@@ -80,6 +80,13 @@ This repo started inside the owner's `Manandi/god` repo (the Hollow Roots game) 
   so the bey kept its block shapes and the parts littered the stadium. Fixed: BeySpawner moves any imported bey
   meshes from Workspace into ReplicatedStorage.BeyMeshes at start.
 
+- **2026-10-14, night (owner asleep, asked to fix everything):** owner: gaps between parts; the bey could cruise
+  upright along the steep wall; tilt should change speed (down faster, back to stop); the stadium should "collide based on
+  the tilt". Fixed: parts stack flush (layer on the wheel's top, driver under its bottom, per combo); ground steering is now a
+  limited push with traction falling on steep slopes, so gravity pulls you back down walls; nose-down lean adds top speed
+  and acceleration, nose-up brakes; the bey leans to match the surface it is on (then the player's tilt on top), so it lies
+  flat on slopes. Collision is still the 4-stud ball, which is orientation-independent. Unverified in Studio.
+
 ### Status: untested in Studio
 
 Nothing here has run in Roblox. It was syntax-checked with `luau-analyze` (only Roblox-type "unknown" messages),

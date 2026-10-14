@@ -3,7 +3,9 @@
 --   Move: WASD / left thumbstick (camera-relative)       Jump: Space / jump button / gamepad A
 --   Aim:  mouse X turns, mouse Y tilts the bey up/down   Touch: drag the right side. Gamepad: right stick
 --   Slam: click (or the SLAM button / right trigger) while airborne          R: reset
--- Tilt matters: aim up when leaving a ramp to launch higher, aim down to dive. All numbers: BeyConfig.Movement.
+-- Tilt: nose down (mouse down) leans in for more speed, nose up (mouse up) brakes; nose up as you leave the stadium lip
+-- launches higher, nose down in the air dives. Slopes pull you back down and the bey lies flat on them.
+-- All numbers: BeyConfig.Movement.
 -- This script owns the physics (the server gave this player network ownership of the body).
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -88,6 +90,7 @@ local lastJumpAt = -10
 local jumpQueued, slamQueued = false, false
 local lastLandSpeed = 0
 local focus = nil
+local groundUp = Vector3.yAxis -- smoothed normal of the surface we are on (upright in the air)
 local noseYaw = 0 -- which way the bey's nose points: its travel direction, so "tilt up" always means up the way you're going
 
 local rayParams = RaycastParams.new()
@@ -279,14 +282,42 @@ local function step(dt)
 			slamRemote:FireServer(pos, lastLandSpeed)
 		end
 
-		-- Remove velocity pushing into the surface, then steer along it so ramps carry us up smoothly.
+		-- The surface holds us: remove any velocity going into it. Gravity (applied by Roblox) keeps acting along
+		-- the surface, and our steering is a limited push, never a velocity target, so slopes pull you back down.
 		local into = vel:Dot(n)
 		if into < 0 then
 			vel = vel - n * into
 		end
-		local dv = wish * speed
-		local target = dv + Vector3.new(0, -dv:Dot(n) / n.Y, 0)
-		vel = vel + clampMagnitude(target - vel, (hasInput and M.Accel or M.Brake) * dt)
+		groundUp = groundUp:Lerp(n, 1 - math.exp(-M.SurfaceAlignRate * dt)).Unit
+
+		-- Steep surfaces give less grip: full on the flat, little on a 45-degree wall.
+		local traction = math.clamp((n.Y - M.MinGroundNormalY) / (1 - M.MinGroundNormalY), M.MinTraction, 1)
+		-- Tilt: nose down leans into it (faster and quicker to speed up), nose up / back brakes.
+		local lean = math.max(-tilt, 0)
+		local brakeLean = math.max(tilt, 0)
+		local topSpeed = speed * (1 + M.LeanSpeedBonus * lean)
+		local push = M.Accel * (1 + M.LeanAccelBonus * lean) * traction
+
+		if hasInput then
+			local dir = wish - n * wish:Dot(n) -- input direction laid along the surface
+			if dir.Magnitude > 1e-3 then
+				dir = dir.Unit
+				local along = vel:Dot(dir)
+				if along < topSpeed then
+					vel = vel + dir * math.min(push * dt * math.min(wish.Magnitude, 1), topSpeed - along)
+				end
+				-- Grip: bleed off sideways drift so turns bite (weakly on steep walls, so you still slide).
+				local side = vel - dir * vel:Dot(dir)
+				vel = vel - side * math.min(1, M.Grip * traction * dt)
+			end
+		end
+
+		-- Friction: light rolling friction always; a brake when you let go on gentle ground; a strong brake when leaning back.
+		local decel = M.RollingFriction + (hasInput and 0 or M.Brake * traction) + brakeLean * M.LeanBrake * traction
+		local spd = vel.Magnitude
+		if spd > 0 then
+			vel = vel * (math.max(spd - decel * dt, 0) / spd)
+		end
 
 		if jumpQueued then
 			local up = M.JumpSpeed * (1 + M.JumpTiltBonus * math.max(tilt, 0))
@@ -303,6 +334,8 @@ local function step(dt)
 				vel = vel + Vector3.new(0, flat * M.LaunchFactor * factor, 0)
 			end
 		end
+
+		groundUp = groundUp:Lerp(Vector3.yAxis, 1 - math.exp(-3 * dt)).Unit
 
 		-- Air control: weak steering that can't exceed the faster of (current speed, top speed).
 		local flatVel = Vector3.new(vel.X, 0, vel.Z)
@@ -338,13 +371,20 @@ local function step(dt)
 		local targetYaw = flat.Magnitude > M.NoseMinSpeed and math.atan2(-flat.X, -flat.Z) or yaw
 		local diff = (targetYaw - noseYaw + math.pi) % (2 * math.pi) - math.pi
 		noseYaw = noseYaw + diff * math.min(1, M.NoseTurnRate * dt)
-		align.CFrame = CFrame.Angles(0, noseYaw, 0) * CFrame.Angles(pitch, 0, 0)
+		-- Lean with the surface under us (so the bey lies flat on a sloped wall), then apply the player's tilt.
+		local up = groundUp
+		local flatNose = Vector3.new(-math.sin(noseYaw), 0, -math.cos(noseYaw))
+		local fwd = flatNose - up * flatNose:Dot(up)
+		fwd = fwd.Magnitude > 1e-3 and fwd.Unit or flatNose
+		local back = -fwd
+		align.CFrame = CFrame.fromMatrix(Vector3.zero, up:Cross(back), up, back) * CFrame.Angles(pitch, 0, 0)
 	end
 
 	readout.Text = string.format(
-		"TILT %+.0f deg   SPEED %.0f\n%s\nATK %.1f DEF %.1f STA %.1f BAL %.1f",
+		"TILT %+.0f deg (%s)   SPEED %.0f\n%s\nATK %.1f DEF %.1f STA %.1f BAL %.1f",
 		math.deg(pitch),
-		Vector3.new(vel.X, 0, vel.Z).Magnitude,
+		tilt < -0.15 and "LEAN" or (tilt > 0.15 and "BRAKE" or "LEVEL"),
+		vel.Magnitude,
 		slamming and "SLAMMING" or (grounded and "GROUND" or "AIR"),
 		body:GetAttribute("Attack") or 0,
 		body:GetAttribute("Defense") or 0,
@@ -390,6 +430,7 @@ local function bind(newModel)
 	align = model:WaitForChild("Align")
 	yaw, pitch = 0, 0
 	noseYaw = 0
+	groundUp = Vector3.yAxis
 	focus = nil
 	slamming = false
 	wasGrounded = false
