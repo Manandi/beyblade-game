@@ -24,34 +24,35 @@ This repo started inside the owner's `Manandi/god` repo (the Hollow Roots game) 
 | Physics authority | Story fights vs AI villains use **client-owned physics** (cheap, no one is competing). **PvP must move to Server Authority** (Roblox's opt-in prediction system) because a client that owns a part has full say over its physics and exploiters can fake hits. Test fast spinning collisions early; mispredictions have been reported. |
 | Wiki stats (owner asked 2026-10-14 to copy them for rare parts) | **Not copied.** The wiki's part catalog (real names tied to real numbers) is someone else's work, and the owner has no licence. The wiki is used only to learn the *trade-offs* (attack types give up stamina, defense types are heavy, balance types sit between). Stat weights in `BeyConfig` follow those archetypes with original numbers. If a licence deal happens, real data can be added then. |
 | Fan-made 3D models (owner asked 2026-10-14) | Fan **recreations** of official beys copy Takara Tomy's designs and are not usable, whatever the uploader's licence. Fan **original** designs are usable only with a commercial licence (CC-BY/CC0 or purchased), no Beyblade branding, and not a lightly altered official bey. |
+| Free progression route (review, 2026-10-14) | Rarity budgets differ (Common 8 ... Legendary 30 per part), so leveling alone can't make a Common part Legendary. The free route is the **Workshop**: every rarity up to Legendary is sold for **Shards**, earned only by battling (a Legendary set is 2400 Shards, about 80 Normal wins). Level 50 gives the full level multiplier. Ultra Legendary is never sold for Shards. Budgets unchanged. |
+| Paid crates (review, 2026-10-14) | **Disabled.** There is no purchase code at all. Before turning them on: per-player restrictions (ineligible users), paid-item trading rules, indirect Robux purchases, final outcomes of full-bey bundles shown, and durable, duplicate-safe granting (receipt processing with a purchase-id ledger in the player's save). |
+| Competitive stats (review, 2026-10-14) | Reviewer recommends **normalised stats in ranked play** (rarity mostly cosmetic there), because a 10% budget increase can compound across speed, attack, defense and stamina, and brackets would split a small player pool. A recommendation to decide before PvP, not built. |
+| Server trust (review, 2026-10-14) | Server owns spin, damage, outcomes and rewards. Client sends only "rematch / leave / forfeit", Workshop requests and a bare "slam landed" (checked against the fall the server observed). Player bey physics stays client-owned for PvE (residual exposure listed in HANDOFF.md). |
 | Rarity data | `src/shared/BeyConfig.lua` is the single source. The shop UI reads odds from `GetDisplayOdds()`, never a copy. |
 | Model | Sonnet 5.5 for step-by-step scripting and tuning. Opus 5.5 is worth switching to for the Server Authority move and netcode debugging. |
 
-## What exists (milestone 1: the tilt-and-launch feel)
+## What exists (PvE loop, branch `pve-loop`)
 
-| File | Does |
+See [HANDOFF.md](HANDOFF.md) for the full change log, test results, Studio checklist and what is unverified.
+
+| Where | Does |
 |---|---|
-| `default.project.json` | [Rojo](https://rojo.space) project: `rojo serve`, then connect from Studio. |
-| `src/shared/BeyConfig.lua` | 33 original parts (3 slots × 6 rarities), level scaling, movement tuning, two crate odds tables, `RollBox`, `GetDisplayOdds`. Validates at load: odds total exactly 10000 bp, stats match each rarity's budget, Ultra Legendary is +10% of the best Legendary. |
-| `src/shared/BeyDesigns.lua` | Looks of every part, as data: style, blade count, primary and accent colours. |
-| `src/shared/BeyVisuals.lua` | Builds the bey from those designs out of basic parts, welded to the spinning hub: 5 layer styles (Spike, Hook, Blade, Petal, Armor), 4 disc styles, 5 driver styles. Epic+ get a glowing trim ring, Legendary+ sparks, Ultra Legendary a light. |
-| `src/server/StadiumBuilder.server.lua` | Builds a round bowl stadium (flat centre, steepening rings, 72° launch lip, invisible fence) and three knockable dummies if there is no `Stadium` in Workspace. Sets gravity to 140. |
-| `tools/blender/build_beys.py` | Models all 33 parts in Blender, hard-surface style (runs headless with `pip install bpy shapely mapbox_earcut`): writes `assets/meshes/*.fbx`, `src/shared/BeyMeshData.lua` and `assets/previews/*.png`. |
-| `src/server/BeySpawner.server.lua` | Builds each player's bey (invisible ball body + hinged spinning disc), gives them network ownership, parks the avatar, and handles the slam hit with basic checks (distance, cooldown, value types). |
-| `src/client/BeyController.client.lua` | Camera-relative movement, jump, mouse/touch/stick tilt, ramp takeoff boost, glide and dive from tilt, dive-slam, scriptable third-person camera, debug HUD, touch SLAM button. |
-| `tools/run_tests.sh` | Runs `BeyConfig` under the plain `luau` CLI: validation, odds, 800k simulated rolls, and a bad-odds rejection. |
+| `src/shared/Core/MovementCore.lua` | Movement rules shared by the player and the villain: ground hysteresis, one takeoff boost per takeoff, slam state, jump cooldown, slope traction, lean/brake, sanitising, facing, recovery. |
+| `src/shared/Core/CombatCore.lua` | Spin pools and drain, stat roles, bounded hit damage and knockback, contact de-duplication, slam checks against server-observed falls, ring-out with grace, rate limits. |
+| `src/shared/Core/BattleCore.lua` | Battle lifecycle: countdown → active → finished (once) → cleanup; outcomes; rewards claimable once. |
+| `src/shared/Core/Progression.lua`, `PlayerData.lua`, `SessionStore.lua` | XP, Shards, Workshop, equip rules; versioned save format with migration and repair; session-locked load/save that never overwrites a real save after a failed load. |
+| `src/shared/BeyConfig.lua`, `GameConfig.lua` | All tuning: parts, crate odds, movement; combat, battle, villain, difficulty, progression, saving. |
+| `src/server/` | `Main` (startup + checks), `World` (arena without fence, fenced training bowl, hub with prompts), `BeyService` (on foot / practice / battle modes, avatar park and restore), `BattleService`, `VillainAI`, `DataService`, `BeyFactory`, `MeshImport`. |
+| `src/client/` | `Controller` (bey + camera, restores everything on unbind), `Hud`, `Menus` (Workshop, Settings), `Tutorial`, `Effects` (pooled, capped), `OnFootFallback` (if Roblox's PlayerModule is missing), `Main`. |
+| `tools/run_tests.py` | Unit tests for every Core module and a smoke run of the real scripts in `tools/tests/roblox_mock.luau`; also checks the installer matches `src/`. |
+| `tools/make_installer.py` | Builds `install_in_studio.lua` and `installer_parts/` (only replaces the Spinforge folders; keeps imported meshes). |
+| `tools/blender/build_beys.py` | Models all 33 parts (hard-surface) → FBX, `BeyMeshData.lua`, previews. |
 
-### Setup in Studio
-
-**Fastest (no Rojo):** open `install_in_studio.lua`, copy all of it, paste into Studio's Command Bar (View > Command Bar), press Enter, then Play. It recreates every script, so run it again after each update. It is generated by `tools/make_installer.py`; re-run that after editing anything in `src/` and commit the result.
-
-1. New Baseplate place (you can delete the default baseplate; the stadium builds its own).
-2. Install Rojo, run `rojo serve`, and connect from the Studio plugin.
-   Without Rojo, copy each file into: `BeyConfig` → ReplicatedStorage (ModuleScript),
-   `BeySpawner` and `StadiumBuilder` → ServerScriptService (Script), `BeyController` → StarterPlayerScripts (LocalScript).
-3. Press Play. WASD, hold the mouse still to keep the tilt, move it up/down to tilt.
-   Run up the orange ramp with the mouse pushed forward (nose up) to launch; click in the air to slam the red dummies.
-   R resets.
+### Stat roles
+- **Attack:** more damage dealt and a little more top speed.
+- **Defense:** less damage taken and less knockback.
+- **Stamina:** a bigger spin pool and slower passive spin loss.
+- **Balance:** less knockback, less slam self-damage, and a little more top speed.
 
 ### Playtest log
 
@@ -87,17 +88,15 @@ This repo started inside the owner's `Manandi/god` repo (the Hollow Roots game) 
   and acceleration, nose-up brakes; the bey leans to match the surface it is on (then the player's tilt on top), so it lies
   flat on slopes. Collision is still the 4-stud ball, which is orientation-independent. Unverified in Studio.
 
-### Status: untested in Studio
+- **2026-10-14, overnight (owner asleep; brief from an outside review):** built the full PvE loop on branch `pve-loop`
+  (see HANDOFF.md). Main changes: pure tested Core modules, hardened movement (one boost per takeoff, seam hysteresis,
+  explicit slam state; nose-up now really stops you), server-owned spin/combat/outcomes/rewards, Rook the Grinder with
+  telegraphed attacks, hub + practice + arena (no fence = ring-outs), Workshop progression, session-locked saving, new HUD,
+  tutorial, settings, backup on-foot controls. Not yet run in Studio.
 
-Nothing here has run in Roblox. It was syntax-checked with `luau-analyze` (only Roblox-type "unknown" messages),
-and `BeyConfig` is covered by `tools/run_tests.sh`. Expect to tune the feel:
-every number is in `BeyConfig.Movement` (launch strength, speed, glide, dive, slam, camera).
+### Status
 
-Known first-guess weak spots to look at when playtesting:
-- Ground following uses one downward ray; fast sideways motion over bumps may lose ground contact.
-- The avatar is anchored off to the side, so default Roblox character controls do nothing. The open world will need an on-foot mode and a bey mode.
-- Body orientation (tilt) is set from the client's local `AlignOrientation`; other players see the body position and the spinning disc but not necessarily the tilt. This is solved properly by the Server Authority move.
-- The slam only affects dummies. Bey-vs-bey hits, damage and spin/stamina are milestone 2.
+Everything automated passes (see HANDOFF.md). Nothing on `pve-loop` has been run in Roblox Studio yet.
 
 ### Designs: where they stand
 
@@ -109,9 +108,10 @@ missing, the old block-built shapes are used. Check the previews in `assets/prev
 
 ## Milestones
 
-1. **Tilt, launch and slam feel** on one stadium. *(code written, needs a Studio playtest)*
-2. **Spin and stamina:** spin rate drains, collisions cost it, a bey that stops or leaves the stadium loses. Stats start to matter.
-3. **One AI villain** and a battle win/lose flow, with an on-foot mode in a small area.
-4. **Crates:** shop UI that displays the odds table from `BeyConfig`, server-side purchase and roll, inventory (DataStore), equip parts.
-5. **Leveling:** beys gain levels from story and villain grinding (`LevelMultiplier`).
-6. **Open world and story**, then PvP on Server Authority, then a ranked bracket decision.
+1. **Tilt, launch and slam feel** on one stadium. *(playtested; feel tuned twice)*
+2. **Spin and stamina**, meaningful stats, ring-outs. *(built on `pve-loop`, needs a Studio playtest)*
+3. **One AI villain**, battle win/lose flow, on-foot hub, practice, rematch. *(built on `pve-loop`, needs a playtest)*
+4. **Earnable progression and saving:** XP, Shards, Workshop, equip, DataStore with session locks. *(built on `pve-loop`; live saving unverified)*
+5. **Tilt-aware combat hit geometry** (keep the ball for movement). *(next experiment; see HANDOFF.md)*
+6. **Paid crates**, only after the checklist in Decisions. *(deferred)*
+7. **Open world and story**, more villains; then PvP on Server Authority and the ranked-stats decision. *(deferred)*

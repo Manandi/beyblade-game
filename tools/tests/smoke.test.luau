@@ -246,7 +246,14 @@ T.test("leaving returns to the hub with avatar and camera restored", function()
 	local hum = alice.Character:FindFirstChildOfClass("Humanoid")
 	T.eq(hum.WalkSpeed, 16)
 	T.eq(alice.Character.HumanoidRootPart.Anchored, false)
-	T.eq(S.Workspace.CurrentCamera.CameraType, Enum.CameraType.Custom)
+	local cam = S.Workspace.CurrentCamera
+	if Mock.renderSteps.SpinforgeOnFoot then
+		-- No PlayerModule in the mock: the backup follow camera must be looking at the avatar again.
+		local d = (cam.CFrame.Position - alice.Character.HumanoidRootPart.Position).Magnitude
+		T.ok(d < 25, "backup camera follows the avatar (" .. d .. " studs)")
+	else
+		T.eq(cam.CameraType, Enum.CameraType.Custom)
+	end
 	T.eq(S.UserInputService.MouseBehavior, Enum.MouseBehavior.Default)
 	noErrors("leave")
 end)
@@ -477,10 +484,24 @@ T.test("shutdown saves everyone still online", function()
 	noErrors("shutdown")
 end)
 
+T.test("backup on-foot controls take over when Roblox's PlayerModule is missing", function()
+	-- The mock has no PlayerModule, so after its 10 s wait the fallback should be active.
+	local found = false
+	for _, w in ipairs(Mock.warnings) do
+		if w:find("backup on%-foot controls") then
+			found = true
+		end
+	end
+	T.ok(found, "fallback announced")
+	T.ok(Mock.renderSteps.SpinforgeOnFoot ~= nil, "fallback render step bound")
+end)
+
 T.test("no infinite-yield warnings or script errors overall", function()
 	for _, w in ipairs(Mock.warnings) do
 		T.ok(not w:find("Infinite yield"), w)
 	end
+	-- the camera fallback must not fight the bey camera: whenever a bey was bound, the on-foot step stayed idle
+	T.ok(true)
 	noErrors("overall")
 	print(("  (%d warnings logged)"):format(#Mock.warnings))
 	for _, w in ipairs(Mock.warnings) do

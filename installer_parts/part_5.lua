@@ -466,6 +466,10 @@ function Controller.start(ctx)
 		camera.CFrame = CFrame.lookAt(wanted, focus) * effects:shakeOffset(dt)
 	end)
 
+	function Controller.isBound()
+		return body ~= nil and body.Parent ~= nil
+	end
+
 	-- diagnostics (F6) ------------------------------------------------------------------------------------------
 	function Controller.diag()
 		local now = os.clock()
@@ -492,6 +496,10 @@ end
 
 function Controller.diag()
 	return "controller not started"
+end
+
+function Controller.isBound()
+	return false
 end
 
 return Controller

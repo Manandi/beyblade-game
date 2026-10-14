@@ -38,6 +38,9 @@ local effects = Effects.new(settings)
 local menus = Menus.new(hud, remotes)
 local tutorial = Tutorial.new(hud, remotes)
 Controller.start({ remotes = remotes, hud = hud, effects = effects, tutorial = tutorial })
+require(script.Parent.OnFootFallback).start({ hud = hud, isBound = function()
+	return Controller.isBound()
+end })
 
 remotes.Profile.OnClientEvent:Connect(function(p)
 	if type(p) ~= "table" then

@@ -681,6 +681,7 @@ function Mock.reset()
 	uis.IsKeyDown = function(_, key) return Mock.keys[key.Name] == true end
 	uis.GetGamepadState = function() return {} end
 	uis.GetMouseDelta = function() return Mock.mouseDelta or Vector2.new(0, 0) end
+	uis.IsMouseButtonPressed = function() return false end
 
 	services.GuiService.SelectedObject = nil
 	return game
@@ -707,6 +708,7 @@ function Mock.spawnCharacter(p)
 	local char = Instance.new("Model")
 	char.Name = p.Name
 	local hum = Instance.new("Humanoid")
+	hum.Move = function(self, dir) self._moveDir = dir end
 	hum.WalkSpeed = 16
 	hum.JumpHeight = 7.2
 	hum.JumpPower = 50

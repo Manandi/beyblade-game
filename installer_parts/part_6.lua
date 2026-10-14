@@ -508,6 +508,9 @@ local effects = Effects.new(settings)
 local menus = Menus.new(hud, remotes)
 local tutorial = Tutorial.new(hud, remotes)
 Controller.start({ remotes = remotes, hud = hud, effects = effects, tutorial = tutorial })
+require(script.Parent.OnFootFallback).start({ hud = hud, isBound = function()
+	return Controller.isBound()
+end })
 
 remotes.Profile.OnClientEvent:Connect(function(p)
 	if type(p) ~= "table" then
@@ -891,84 +894,94 @@ end
 
 return Menus
 ]=====])
-install('SPS', '', 'ModuleScript', 'Tutorial', [=====[
+install('SPS', '', 'ModuleScript', 'OnFootFallback', [=====[
 --!nonstrict
--- Tutorial: short contextual hints shown while you control a bey, until you've done each thing once:
--- drive, lean in, brake, launch off the lip, slam. Each hint advances when the controller reports the action.
--- Finishing it tells the server (saved in Settings.TutorialDone). Settings can replay it.
+-- OnFootFallback: a backup for walking around the hub, used ONLY if Roblox's own PlayerModule (the default
+-- walking + camera scripts) never loads. That happened once in the owner's Studio, and without it you can't walk
+-- or move the camera. Provides: WASD / left stick walking (camera-relative), Space / A to jump, and a follow
+-- camera (hold right mouse or use the right stick to orbit). Steps aside whenever a bey is being controlled.
 
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
+local Workspace = game:GetService("Workspace")
 
-local Tutorial = {}
-Tutorial.__index = Tutorial
+local OnFootFallback = {}
 
-local function steps()
-	local touch = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
-	local pad = UserInputService.GamepadEnabled
-	local aim = touch and "Drag on the right side of the screen" or pad and "Push the right stick" or "Move the mouse"
-	return {
-		{ id = "moved", title = "Drive", body = touch and "Use the left thumbstick to drive. Your bey goes where the camera faces." or pad and "Left stick drives. Your bey goes where the camera faces." or "W A S D to drive. Your bey goes where the camera faces." },
-		{ id = "leaned", title = "Lean in for speed", body = aim .. " DOWN to tip the nose down. You go faster." },
-		{ id = "braked", title = "Lean back to brake", body = aim .. " UP to tip the nose back. You slow down and stop." },
-		{ id = "launched", title = "Launch off the lip", body = "Drive up the stadium wall and lift the nose just as you reach the steep lip. Nose up = higher." },
-		{ id = "slammed", title = "Slam", body = (touch and "Tap SLAM" or pad and "Press the right trigger" or "Click") .. " while in the air to dive down. Land it next to your opponent." },
-	}
-end
-
-function Tutorial.new(hud, remotes)
-	local self = setmetatable({}, Tutorial)
-	self.hud = hud
-	self.remotes = remotes
-	self.done = true -- until the profile says otherwise
-	self.index = 1
-	self.active = false
-	self.steps = steps()
-	return self
-end
-
-function Tutorial:setProfile(p)
-	local wasDone = self.done
-	self.done = p.Settings.TutorialDone
-	if wasDone and not self.done then
-		self.index = 1
-		self.steps = steps()
-	end
-	self:_render()
-end
-
--- Shown only while the player controls a bey.
-function Tutorial:setActive(active)
-	self.active = active
-	self:_render()
-end
-
-function Tutorial:signal(id)
-	if self.done or not self.active then
-		return
-	end
-	local step = self.steps[self.index]
-	if step and step.id == id then
-		self.index += 1
-		if self.index > #self.steps then
-			self.done = true
-			self.remotes.Request:FireServer({ action = "tutorialDone" })
-			self.hud:hideHint()
-			self.hud:toast("Tutorial complete! Challenge the villain from the hub.")
-			return
+function OnFootFallback.start(ctx)
+	local player = Players.LocalPlayer
+	local hud, isBound = ctx.hud, ctx.isBound
+	task.spawn(function()
+		local module = player:WaitForChild("PlayerScripts"):WaitForChild("PlayerModule", 10)
+		if module then
+			return -- the normal controls are there; nothing to do
 		end
-		self:_render()
-	end
+		warn("Spinforge: Roblox's PlayerModule didn't load; using backup on-foot controls.")
+		hud:toast("Backup controls on: WASD to walk, Space to jump, hold right mouse to look")
+		local camera = Workspace.CurrentCamera
+		local yaw, pitch = 0, 0.35
+
+		UserInputService.InputBegan:Connect(function(input, processed)
+			if processed or isBound() or UserInputService:GetFocusedTextBox() then
+				return
+			end
+			if input.KeyCode == Enum.KeyCode.Space or input.KeyCode == Enum.KeyCode.ButtonA then
+				local hum = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
+				if hum then
+					hum.Jump = true
+				end
+			end
+		end)
+
+		RunService:BindToRenderStep("SpinforgeOnFoot", Enum.RenderPriority.Camera.Value + 2, function(dt)
+			if isBound() then
+				return
+			end
+			local char = player.Character
+			local hum = char and char:FindFirstChildOfClass("Humanoid")
+			local root = char and char:FindFirstChild("HumanoidRootPart")
+			if not (hum and root) then
+				return
+			end
+			-- look around
+			local orbiting = UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) and not hud:mouseFree()
+			UserInputService.MouseBehavior = orbiting and Enum.MouseBehavior.LockCurrentPosition or Enum.MouseBehavior.Default
+			if orbiting then
+				local d = UserInputService:GetMouseDelta()
+				yaw -= d.X * 0.005
+				pitch = math.clamp(pitch + d.Y * 0.005, -0.2, 1.2)
+			end
+			for _, state in ipairs(UserInputService:GetGamepadState(Enum.UserInputType.Gamepad1)) do
+				if state.KeyCode == Enum.KeyCode.Thumbstick2 and state.Position.Magnitude > 0.15 then
+					yaw -= state.Position.X * 2.5 * dt
+					pitch = math.clamp(pitch - state.Position.Y * 1.5 * dt, -0.2, 1.2)
+				end
+			end
+			-- walk (camera-relative)
+			local x, z = 0, 0
+			if not UserInputService:GetFocusedTextBox() and not hud:mouseFree() then
+				local K = Enum.KeyCode
+				x = (UserInputService:IsKeyDown(K.D) and 1 or 0) - (UserInputService:IsKeyDown(K.A) and 1 or 0)
+				z = (UserInputService:IsKeyDown(K.S) and 1 or 0) - (UserInputService:IsKeyDown(K.W) and 1 or 0)
+				for _, state in ipairs(UserInputService:GetGamepadState(Enum.UserInputType.Gamepad1)) do
+					if state.KeyCode == Enum.KeyCode.Thumbstick1 and state.Position.Magnitude > 0.15 then
+						x += state.Position.X
+						z -= state.Position.Y
+					end
+				end
+			end
+			local flat = CFrame.Angles(0, yaw, 0)
+			local dir = flat.RightVector * x + flat.LookVector * -z
+			hum:Move(dir.Magnitude > 1 and dir.Unit or dir, false)
+			-- follow camera
+			camera.CameraType = Enum.CameraType.Scriptable
+			local focus = root.Position + Vector3.new(0, 2, 0)
+			local eye = (CFrame.new(focus) * CFrame.Angles(0, yaw, 0) * CFrame.Angles(-pitch, 0, 0) * CFrame.new(0, 0, 16)).Position
+			camera.CFrame = CFrame.lookAt(eye, focus)
+		end)
+	end)
 end
 
-function Tutorial:_render()
-	local step = self.steps[self.index]
-	if self.done or not self.active or not step then
-		self.hud:hideHint()
-		return
-	end
-	self.hud:showHint(("TUTORIAL %d/%d"):format(self.index, #self.steps), step.title, step.body)
-end
-
-return Tutorial
+return OnFootFallback
 ]=====])
 print('Spinforge installer part 6 of 7 done. Now run part 7.')
