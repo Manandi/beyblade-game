@@ -23,6 +23,7 @@ This repo started inside the owner's `Manandi/god` repo (the Hollow Roots game) 
 | Pay-to-win | Owner's call: rare parts raise stats, the grind reaches the same cap, and only the Ultra Legendary tier is 10% above it. **Open question:** in PvP that tier is a straight purchase advantage. Options are to keep Ultra Legendary out of ranked/matchmade PvP, or give it its own bracket. |
 | Physics authority | Story fights vs AI villains use **client-owned physics** (cheap, no one is competing). **PvP must move to Server Authority** (Roblox's opt-in prediction system) because a client that owns a part has full say over its physics and exploiters can fake hits. Test fast spinning collisions early; mispredictions have been reported. |
 | Wiki stats (owner asked 2026-10-14 to copy them for rare parts) | **Not copied.** The wiki's part catalog (real names tied to real numbers) is someone else's work, and the owner has no licence. The wiki is used only to learn the *trade-offs* (attack types give up stamina, defense types are heavy, balance types sit between). Stat weights in `BeyConfig` follow those archetypes with original numbers. If a licence deal happens, real data can be added then. |
+| Fan-made 3D models (owner asked 2026-10-14) | Fan **recreations** of official beys copy Takara Tomy's designs and are not usable, whatever the uploader's licence. Fan **original** designs are usable only with a commercial licence (CC-BY/CC0 or purchased), no Beyblade branding, and not a lightly altered official bey. |
 | Rarity data | `src/shared/BeyConfig.lua` is the single source. The shop UI reads odds from `GetDisplayOdds()`, never a copy. |
 | Model | Sonnet 5.5 for step-by-step scripting and tuning. Opus 5.5 is worth switching to for the Server Authority move and netcode debugging. |
 
@@ -35,7 +36,7 @@ This repo started inside the owner's `Manandi/god` repo (the Hollow Roots game) 
 | `src/shared/BeyDesigns.lua` | Looks of every part, as data: style, blade count, primary and accent colours. |
 | `src/shared/BeyVisuals.lua` | Builds the bey from those designs out of basic parts, welded to the spinning hub: 5 layer styles (Spike, Hook, Blade, Petal, Armor), 4 disc styles, 5 driver styles. Epic+ get a glowing trim ring, Legendary+ sparks, Ultra Legendary a light. |
 | `src/server/StadiumBuilder.server.lua` | Builds a round bowl stadium (flat centre, steepening rings, 72° launch lip, invisible fence) and three knockable dummies if there is no `Stadium` in Workspace. Sets gravity to 140. |
-| `tools/blender/build_beys.py` | Models all 33 parts in Blender (runs headless with `pip install bpy`): writes `assets/meshes/*.fbx`, `src/shared/BeyMeshData.lua` and `assets/previews/*.png`. |
+| `tools/blender/build_beys.py` | Models all 33 parts in Blender, hard-surface style (runs headless with `pip install bpy shapely mapbox_earcut`): writes `assets/meshes/*.fbx`, `src/shared/BeyMeshData.lua` and `assets/previews/*.png`. |
 | `src/server/BeySpawner.server.lua` | Builds each player's bey (invisible ball body + hinged spinning disc), gives them network ownership, parks the avatar, and handles the slam hit with basic checks (distance, cooldown, value types). |
 | `src/client/BeyController.client.lua` | Camera-relative movement, jump, mouse/touch/stick tilt, ramp takeoff boost, glide and dive from tilt, dive-slam, scriptable third-person camera, debug HUD, touch SLAM button. |
 | `tools/run_tests.sh` | Runs `BeyConfig` under the plain `luau` CLI: validation, odds, 800k simulated rolls, and a bad-odds rejection. |
@@ -67,6 +68,13 @@ This repo started inside the owner's `Manandi/god` repo (the Hollow Roots game) 
   in front of walls; the stadium is now a bowl (flat centre, rings at 12/26/45 degrees, a 72-degree launch lip, glowing rim,
   invisible fence above it); every part now has a Blender mesh (`tools/blender/build_beys.py`, previews in
   `assets/previews/`) imported once by the owner (README). None of this has been seen in Studio yet.
+
+- **2026-10-14, models v2:** owner said the first Blender models "look so bad" and pointed at Beyblade fan models on
+  Sketchfab and stlfinder. Those are mostly recreations of official designs (not usable; see Decisions), and no usable
+  original, commercially licensed models turned up. So the modeler was rewritten in a hard-surface style: each part is
+  a stack of extruded 2D outlines with chamfered edges (attack rings with an inlay plate, faceted hub and emblem; machined
+  metal wheels with weight holes; faceted drivers). Previews are Cycles renders. Hiring a 3D artist for hero beys remains
+  the route to top quality; their meshes drop into the same import system.
 
 ### Status: untested in Studio
 

@@ -47,7 +47,7 @@ A small readout (top left) shows tilt, speed and state. Every tuning number is i
 |---|---|
 | `src/shared/BeyConfig.lua` | 33 original parts, stats, level scaling, movement tuning, crate odds and rolls |
 | `src/shared/BeyDesigns.lua`, `BeyVisuals.lua` | Colours and style of every part; builds the bey from the imported meshes, or from basic shapes if they are missing |
-| `tools/blender/build_beys.py`, `assets/` | Blender modelling of all 33 parts: FBX files to import, `BeyMeshData.lua` (sizes) and preview images |
+| `tools/blender/build_beys.py`, `assets/` | Blender modelling of all 33 parts (`pip install bpy shapely mapbox_earcut`, then `python3 tools/blender/build_beys.py`): FBX files to import, `BeyMeshData.lua` (sizes) and preview images |
 | `src/server/` | Round test stadium (bowl with a steep launch lip) and bey spawner (slam validation) |
 | `src/client/BeyController.client.lua` | Movement, tilt, launch, slam, camera, touch and gamepad |
 | `tools/run_tests.sh` | Checks the config under the plain `luau` CLI: odds total exactly 100%, Ultra Legendary is +10%, simulated rolls, every part has a distinct design |
