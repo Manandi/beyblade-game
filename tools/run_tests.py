@@ -74,6 +74,14 @@ def main():
     if not ok:
         failures.append("bad-odds")
 
+    # The committed installer must match the current source.
+    out = subprocess.run([sys.executable, os.path.join(ROOT, "tools", "make_installer.py"), "--check"], capture_output=True, text=True)
+    ok = out.returncode == 0
+    print(("PASS " if ok else "FAIL ") + "installer matches src/")
+    if not ok:
+        print(out.stdout.strip())
+        failures.append("installer")
+
     print()
     if failures:
         print("FAILED: " + ", ".join(failures))

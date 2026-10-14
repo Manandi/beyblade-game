@@ -202,8 +202,11 @@ end)
 
 T.test("ring-out: the villain leaves the stadium, the player wins and is rewarded once", function()
 	local xp0 = lastProfile(alice).XP
-	villainBody().CFrame = CFrame.new(60, 3, 0)
-	Mock.advance(0.2)
+	for _ = 1, 40 do -- held outside for longer than the ring-out grace
+		villainBody().CFrame = CFrame.new(60, 3, 0)
+		Mock.advance(1 / 60)
+	end
+	Mock.advance(0.1)
 	local fin = events(alice, "finished")
 	T.eq(#fin, 1)
 	T.eq(fin[1].outcome, "win")
@@ -282,6 +285,50 @@ T.test("equip is refused during a battle; the new part is on the next bey", func
 	noErrors("equip in battle")
 end)
 
+-------------------------------------------------------------------------------- client menus
+
+local function findButton(root, text)
+	for _, d in ipairs(root:GetDescendants()) do
+		if d.ClassName == "TextButton" and d.Text == text and d.Visible ~= false then
+			return d
+		end
+	end
+	return nil
+end
+
+T.test("client: the Workshop opens from the kiosk and equips through the UI", function()
+	prompt("WorkshopPrompt").Triggered:Fire(alice)
+	Mock.advance(0.1)
+	local hud = alice.PlayerGui.SpinforgeHud
+	local window = hud:FindFirstChild("Workshop")
+	T.ok(window and window.Visible, "workshop visible")
+	local equip = findButton(window, "Equip") -- the starter layer is owned and not equipped now
+	T.ok(equip, "an Equip button")
+	equip.Activated:Fire()
+	Mock.advance(0.1)
+	T.eq(lastProfile(alice).Equipped.Layer, "layer_cinderlash", "equipped via the UI")
+	local close = findButton(window, "X")
+	close.Activated:Fire()
+	Mock.advance(0.1)
+	T.ok(not window.Visible, "closed")
+	noErrors("workshop ui")
+end)
+
+T.test("client: settings toggles are saved on the server", function()
+	local hud = alice.PlayerGui.SpinforgeHud
+	hud.Profile:FindFirstChild("Settings", true) -- the profile chip's Settings button
+	local settingsBtn = findButton(hud.Profile, "Settings")
+	settingsBtn.Activated:Fire()
+	Mock.advance(0.1)
+	local shake = findButton(hud.Settings, "Camera shake: ON")
+	T.ok(shake, "shake toggle shows ON")
+	shake.Activated:Fire()
+	Mock.advance(0.1)
+	T.eq(lastProfile(alice).Settings.CameraShake, false)
+	findButton(hud.Settings, "X").Activated:Fire()
+	noErrors("settings")
+end)
+
 -------------------------------------------------------------------------------- practice
 
 T.test("practice: enter, slams need a fall, leave", function()
@@ -290,6 +337,22 @@ T.test("practice: enter, slams need a fall, leave", function()
 	T.eq(alice:GetAttribute("Mode"), "Practice")
 	local pb = bodyOf(alice)
 	T.ok(pb and (pb.Position - Vector3.new(0, 0, -130)).Magnitude < 20, "in the training stadium")
+	-- tutorial: first hint shown; driving for a moment advances it (W held, fallback input reader)
+	local hud = alice.PlayerGui.SpinforgeHud
+	local hint = nil
+	for _, d in ipairs(hud:GetDescendants()) do
+		if d.ClassName == "TextLabel" and type(d.Text) == "string" and d.Text:find("^TUTORIAL") then
+			hint = d
+		end
+	end
+	T.ok(hint and hint.Text == "TUTORIAL 1/5", "tutorial step 1: " .. tostring(hint and hint.Text))
+	local start = pb.Position
+	Mock.keys.W = true
+	Mock.advance(1.5)
+	Mock.keys.W = false
+	T.eq(hint.Text, "TUTORIAL 2/5", "advanced after driving")
+	T.ok((pb.Position - start).Magnitude > 5, "the bey drove forward")
+	Mock.advance(2)
 	local slams = count(events(alice, "slam"))
 	Mock.advance(1)
 	remotes.SlamLanded:FireServer()

@@ -841,8 +841,9 @@ GameConfig.Battle = {
 	Duration = 90, -- then the higher spin share wins
 	DrawMargin = 0.02, -- spin shares this close at timeout = draw
 	ResultTimeout = 45, -- the result screen closes itself after this
-	RingOutRadius = 44.5, -- beyond the rim (42) = out of the stadium
+	RingOutRadius = 42.5, -- past the rim (42): a bey inside the bowl never gets beyond ~41, one on the rim ledge is out
 	RingOutBelowY = -10,
+	RingOutGrace = 0.4, -- seconds a bey must stay outside before it counts (falling below the floor counts at once)
 	StartRadius = 12, -- where the two beys start, either side of the centre
 }
 
@@ -1286,6 +1287,20 @@ function CombatCore.isRingOut(pos, B)
 	end
 	local flat = math.sqrt(pos.X * pos.X + pos.Z * pos.Z)
 	return flat > B.RingOutRadius or pos.Y < B.RingOutBelowY
+end
+
+-- Ring-out with a short grace: a bey must stay outside for B.RingOutGrace seconds (a launch that pokes past the
+-- rim and steers back in survives). Falling below the floor counts at once. timers: table kept per battle.
+function CombatCore.ringOutStep(timers, key, pos, now, B)
+	if not finiteVector(pos) or pos.Y < B.RingOutBelowY then
+		return true
+	end
+	if CombatCore.isRingOut(pos, B) then
+		timers[key] = timers[key] or now
+		return now - timers[key] >= B.RingOutGrace
+	end
+	timers[key] = nil
+	return false
 end
 
 -- Rolling record of the fastest downward speed the SERVER saw for a bey, so slam claims are checked against it.
@@ -2187,6 +2202,7 @@ startBattle = function(player)
 		diff = diff,
 		contacts = CombatCore.newContacts(),
 		villainFall = CombatCore.newFallTracker(),
+		outTimers = {},
 		startedAt = nil,
 	}
 	rec.battle = BattleCore.new(rec.id, {
@@ -2294,10 +2310,10 @@ local function step(dt)
 		CombatCore.recordFall(rec.villainFall, rec.villain.body.AssemblyLinearVelocity.Y, now, C.SlamFallWindow)
 		-- ring-outs (relative to the arena centre)
 		local center = World.ARENA_CENTER
-		if CombatCore.isRingOut(rec.mine.body.Position - center, B) then
+		if CombatCore.ringOutStep(rec.outTimers, "player", rec.mine.body.Position - center, now, B) then
 			BattleCore.ringOut(b, "player")
 		end
-		if CombatCore.isRingOut(rec.villain.body.Position - center, B) then
+		if CombatCore.ringOutStep(rec.outTimers, "villain", rec.villain.body.Position - center, now, B) then
 			BattleCore.ringOut(b, "villain")
 		end
 		resolveContact(rec, now)
@@ -2714,13 +2730,31 @@ function BeyService.start(r, dataService, onSlam)
 		end
 	end)
 
+	-- A character that appears outside the hub (e.g. at a template SpawnLocation inside a stadium) is moved to
+	-- the hub spawn, so nobody starts trapped in a bowl.
+	local function toHubIfLost(player)
+		task.defer(function()
+			local char = player.Character
+			local root = char and char:FindFirstChild("HumanoidRootPart")
+			if root and BeyService.mode(player) == "OnFoot" and not root.Anchored then
+				local flat = Vector3.new(root.Position.X - World.HUB_CENTER.X, 0, root.Position.Z - World.HUB_CENTER.Z)
+				if flat.Magnitude > 60 then
+					root.CFrame = CFrame.new(World.SPAWN)
+				end
+			end
+		end)
+	end
+	BeyService.toHubIfLost = toHubIfLost
+
 	local function hookCharacter(player)
 		player.CharacterAdded:Connect(function()
 			-- A reset or respawn while in bey mode: end it cleanly (BattleService treats it as leaving).
 			if BeyService.mode(player) ~= "OnFoot" then
 				BeyService.onInterrupted(player)
 			end
+			toHubIfLost(player)
 		end)
+		toHubIfLost(player)
 	end
 	Players.PlayerAdded:Connect(function(player)
 		player:SetAttribute("Mode", "OnFoot")
@@ -3026,6 +3060,7 @@ Workspace.Gravity = BeyConfig.Movement.Gravity
 local remotes = Net.setup(ReplicatedStorage)
 World.removeLegacy()
 local world = World.build(GameConfig.Villain.Name)
+World.polishLighting()
 local meshes, moved = MeshImport.collect()
 
 DataService.start(remotes)
@@ -3621,6 +3656,29 @@ local function buildHub(root, villainName)
 		practice = prompt(practice, "Practice", "Training stadium", "PracticePrompt"),
 		workshop = prompt(workshop, "Open", "Workshop", "WorkshopPrompt"),
 	}
+end
+
+-- Light, optional polish so metal parts and neon rarity accents read well. Only adds what the place lacks;
+-- it never replaces lighting effects you've set up yourself.
+function World.polishLighting()
+	local Lighting = game:GetService("Lighting")
+	Lighting.EnvironmentSpecularScale = math.max(Lighting.EnvironmentSpecularScale, 0.8)
+	Lighting.EnvironmentDiffuseScale = math.max(Lighting.EnvironmentDiffuseScale, 0.5)
+	if not Lighting:FindFirstChildWhichIsA("BloomEffect") then
+		local bloom = Instance.new("BloomEffect")
+		bloom.Name = "SpinforgeBloom"
+		bloom.Intensity = 0.5
+		bloom.Size = 24
+		bloom.Threshold = 1.4
+		bloom.Parent = Lighting
+	end
+	if not Lighting:FindFirstChildWhichIsA("ColorCorrectionEffect") then
+		local cc = Instance.new("ColorCorrectionEffect")
+		cc.Name = "SpinforgeColor"
+		cc.Contrast = 0.08
+		cc.Saturation = 0.08
+		cc.Parent = Lighting
+	end
 end
 
 -- Returns { root, arena, training, prompts, built = bool }.

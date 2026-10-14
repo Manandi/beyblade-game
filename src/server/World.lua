@@ -173,6 +173,29 @@ local function buildHub(root, villainName)
 	}
 end
 
+-- Light, optional polish so metal parts and neon rarity accents read well. Only adds what the place lacks;
+-- it never replaces lighting effects you've set up yourself.
+function World.polishLighting()
+	local Lighting = game:GetService("Lighting")
+	Lighting.EnvironmentSpecularScale = math.max(Lighting.EnvironmentSpecularScale, 0.8)
+	Lighting.EnvironmentDiffuseScale = math.max(Lighting.EnvironmentDiffuseScale, 0.5)
+	if not Lighting:FindFirstChildWhichIsA("BloomEffect") then
+		local bloom = Instance.new("BloomEffect")
+		bloom.Name = "SpinforgeBloom"
+		bloom.Intensity = 0.5
+		bloom.Size = 24
+		bloom.Threshold = 1.4
+		bloom.Parent = Lighting
+	end
+	if not Lighting:FindFirstChildWhichIsA("ColorCorrectionEffect") then
+		local cc = Instance.new("ColorCorrectionEffect")
+		cc.Name = "SpinforgeColor"
+		cc.Contrast = 0.08
+		cc.Saturation = 0.08
+		cc.Parent = Lighting
+	end
+end
+
 -- Returns { root, arena, training, prompts, built = bool }.
 function World.build(villainName)
 	local existing = Workspace:FindFirstChild("SpinforgeWorld")

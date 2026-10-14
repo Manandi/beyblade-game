@@ -85,8 +85,9 @@ GameConfig.Battle = {
 	Duration = 90, -- then the higher spin share wins
 	DrawMargin = 0.02, -- spin shares this close at timeout = draw
 	ResultTimeout = 45, -- the result screen closes itself after this
-	RingOutRadius = 44.5, -- beyond the rim (42) = out of the stadium
+	RingOutRadius = 42.5, -- past the rim (42): a bey inside the bowl never gets beyond ~41, one on the rim ledge is out
 	RingOutBelowY = -10,
+	RingOutGrace = 0.4, -- seconds a bey must stay outside before it counts (falling below the floor counts at once)
 	StartRadius = 12, -- where the two beys start, either side of the centre
 }
 
@@ -530,6 +531,20 @@ function CombatCore.isRingOut(pos, B)
 	end
 	local flat = math.sqrt(pos.X * pos.X + pos.Z * pos.Z)
 	return flat > B.RingOutRadius or pos.Y < B.RingOutBelowY
+end
+
+-- Ring-out with a short grace: a bey must stay outside for B.RingOutGrace seconds (a launch that pokes past the
+-- rim and steers back in survives). Falling below the floor counts at once. timers: table kept per battle.
+function CombatCore.ringOutStep(timers, key, pos, now, B)
+	if not finiteVector(pos) or pos.Y < B.RingOutBelowY then
+		return true
+	end
+	if CombatCore.isRingOut(pos, B) then
+		timers[key] = timers[key] or now
+		return now - timers[key] >= B.RingOutGrace
+	end
+	timers[key] = nil
+	return false
 end
 
 -- Rolling record of the fastest downward speed the SERVER saw for a bey, so slam claims are checked against it.

@@ -107,10 +107,18 @@ def stmt(item):
 
 
 def main():
+    check = "--check" in sys.argv
     items = collect()
     count = len(items)
     full = HEADER + CLEAN + "".join(stmt(i) for i in items)
     full += f"print('Spinforge installed: {count} scripts. Press Play.')\n"
+    if check:
+        current = open(os.path.join(ROOT, "install_in_studio.lua")).read()
+        if current != full:
+            print("install_in_studio.lua is out of date: run python3 tools/make_installer.py")
+            sys.exit(1)
+        print("install_in_studio.lua matches src/")
+        return
     open(os.path.join(ROOT, "install_in_studio.lua"), "w").write(full)
 
     parts_dir = os.path.join(ROOT, "installer_parts")

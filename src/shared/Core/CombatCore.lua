@@ -148,6 +148,20 @@ function CombatCore.isRingOut(pos, B)
 	return flat > B.RingOutRadius or pos.Y < B.RingOutBelowY
 end
 
+-- Ring-out with a short grace: a bey must stay outside for B.RingOutGrace seconds (a launch that pokes past the
+-- rim and steers back in survives). Falling below the floor counts at once. timers: table kept per battle.
+function CombatCore.ringOutStep(timers, key, pos, now, B)
+	if not finiteVector(pos) or pos.Y < B.RingOutBelowY then
+		return true
+	end
+	if CombatCore.isRingOut(pos, B) then
+		timers[key] = timers[key] or now
+		return now - timers[key] >= B.RingOutGrace
+	end
+	timers[key] = nil
+	return false
+end
+
 -- Rolling record of the fastest downward speed the SERVER saw for a bey, so slam claims are checked against it.
 function CombatCore.newFallTracker()
 	return { samples = {} }

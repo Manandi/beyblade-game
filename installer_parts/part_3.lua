@@ -440,6 +440,7 @@ startBattle = function(player)
 		diff = diff,
 		contacts = CombatCore.newContacts(),
 		villainFall = CombatCore.newFallTracker(),
+		outTimers = {},
 		startedAt = nil,
 	}
 	rec.battle = BattleCore.new(rec.id, {
@@ -547,10 +548,10 @@ local function step(dt)
 		CombatCore.recordFall(rec.villainFall, rec.villain.body.AssemblyLinearVelocity.Y, now, C.SlamFallWindow)
 		-- ring-outs (relative to the arena centre)
 		local center = World.ARENA_CENTER
-		if CombatCore.isRingOut(rec.mine.body.Position - center, B) then
+		if CombatCore.ringOutStep(rec.outTimers, "player", rec.mine.body.Position - center, now, B) then
 			BattleCore.ringOut(b, "player")
 		end
-		if CombatCore.isRingOut(rec.villain.body.Position - center, B) then
+		if CombatCore.ringOutStep(rec.outTimers, "villain", rec.villain.body.Position - center, now, B) then
 			BattleCore.ringOut(b, "villain")
 		end
 		resolveContact(rec, now)
@@ -967,13 +968,31 @@ function BeyService.start(r, dataService, onSlam)
 		end
 	end)
 
+	-- A character that appears outside the hub (e.g. at a template SpawnLocation inside a stadium) is moved to
+	-- the hub spawn, so nobody starts trapped in a bowl.
+	local function toHubIfLost(player)
+		task.defer(function()
+			local char = player.Character
+			local root = char and char:FindFirstChild("HumanoidRootPart")
+			if root and BeyService.mode(player) == "OnFoot" and not root.Anchored then
+				local flat = Vector3.new(root.Position.X - World.HUB_CENTER.X, 0, root.Position.Z - World.HUB_CENTER.Z)
+				if flat.Magnitude > 60 then
+					root.CFrame = CFrame.new(World.SPAWN)
+				end
+			end
+		end)
+	end
+	BeyService.toHubIfLost = toHubIfLost
+
 	local function hookCharacter(player)
 		player.CharacterAdded:Connect(function()
 			-- A reset or respawn while in bey mode: end it cleanly (BattleService treats it as leaving).
 			if BeyService.mode(player) ~= "OnFoot" then
 				BeyService.onInterrupted(player)
 			end
+			toHubIfLost(player)
 		end)
+		toHubIfLost(player)
 	end
 	Players.PlayerAdded:Connect(function(player)
 		player:SetAttribute("Mode", "OnFoot")

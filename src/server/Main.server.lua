@@ -35,6 +35,7 @@ Workspace.Gravity = BeyConfig.Movement.Gravity
 local remotes = Net.setup(ReplicatedStorage)
 World.removeLegacy()
 local world = World.build(GameConfig.Villain.Name)
+World.polishLighting()
 local meshes, moved = MeshImport.collect()
 
 DataService.start(remotes)

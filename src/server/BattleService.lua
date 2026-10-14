@@ -192,6 +192,7 @@ startBattle = function(player)
 		diff = diff,
 		contacts = CombatCore.newContacts(),
 		villainFall = CombatCore.newFallTracker(),
+		outTimers = {},
 		startedAt = nil,
 	}
 	rec.battle = BattleCore.new(rec.id, {
@@ -299,10 +300,10 @@ local function step(dt)
 		CombatCore.recordFall(rec.villainFall, rec.villain.body.AssemblyLinearVelocity.Y, now, C.SlamFallWindow)
 		-- ring-outs (relative to the arena centre)
 		local center = World.ARENA_CENTER
-		if CombatCore.isRingOut(rec.mine.body.Position - center, B) then
+		if CombatCore.ringOutStep(rec.outTimers, "player", rec.mine.body.Position - center, now, B) then
 			BattleCore.ringOut(b, "player")
 		end
-		if CombatCore.isRingOut(rec.villain.body.Position - center, B) then
+		if CombatCore.ringOutStep(rec.outTimers, "villain", rec.villain.body.Position - center, now, B) then
 			BattleCore.ringOut(b, "villain")
 		end
 		resolveContact(rec, now)

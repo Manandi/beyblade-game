@@ -593,6 +593,9 @@ function Mock.reset()
 	end
 	Mock.closeHandlers = {}
 
+	services.Lighting.EnvironmentSpecularScale = 0
+	services.Lighting.EnvironmentDiffuseScale = 0
+
 	-- Workspace
 	local ws = services.Workspace
 	ws.Gravity = 196.2

@@ -51,8 +51,9 @@ GameConfig.Battle = {
 	Duration = 90, -- then the higher spin share wins
 	DrawMargin = 0.02, -- spin shares this close at timeout = draw
 	ResultTimeout = 45, -- the result screen closes itself after this
-	RingOutRadius = 44.5, -- beyond the rim (42) = out of the stadium
+	RingOutRadius = 42.5, -- past the rim (42): a bey inside the bowl never gets beyond ~41, one on the rim ledge is out
 	RingOutBelowY = -10,
+	RingOutGrace = 0.4, -- seconds a bey must stay outside before it counts (falling below the floor counts at once)
 	StartRadius = 12, -- where the two beys start, either side of the centre
 }
 

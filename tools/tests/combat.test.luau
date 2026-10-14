@@ -107,6 +107,18 @@ T.test("ring-out: outside the radius, below the floor, or invalid", function()
 	T.ok(CC.isRingOut(Vector3.new(0 / 0, 0, 0), B))
 end)
 
+T.test("ring-out grace: brief excursions past the rim survive; staying out or falling doesn't", function()
+	local timers = {}
+	local out = Vector3.new(B.RingOutRadius + 2, 20, 0)
+	local inside = Vector3.new(10, 3, 0)
+	T.ok(not CC.ringOutStep(timers, "p", out, 0, B), "just crossed")
+	T.ok(not CC.ringOutStep(timers, "p", inside, B.RingOutGrace * 0.5, B), "came back")
+	T.ok(not CC.ringOutStep(timers, "p", out, 1, B), "crossed again: timer restarted")
+	T.ok(CC.ringOutStep(timers, "p", out, 1 + B.RingOutGrace + 0.01, B), "stayed out")
+	T.ok(CC.ringOutStep({}, "q", Vector3.new(0, B.RingOutBelowY - 1, 0), 0, B), "fell below: at once")
+	T.ok(CC.ringOutStep({}, "q", Vector3.new(0 / 0, 0, 0), 0, B), "invalid position")
+end)
+
 T.test("rate limiter: per key, rolling one-second window", function()
 	local rl = CC.newRateLimiter(3)
 	T.ok(CC.allow(rl, "p", 0) and CC.allow(rl, "p", 0.1) and CC.allow(rl, "p", 0.2))
