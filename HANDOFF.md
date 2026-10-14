@@ -10,9 +10,9 @@ until you playtest (checklist below).
 ## Install (about 1 minute)
 
 1. Open your test place in Studio (not in Play mode).
-2. Paste `install_in_studio.lua` (194 KB) into the Command Bar and click Run.
+2. Paste `install_in_studio.lua` (215 KB) into the Command Bar and click Run.
    If that paste fails, run `installer_parts/part_1.lua` … `part_7.lua` instead, **in order**. Each one is under 40 KB.
-3. Output should say `Spinforge installed: 28 scripts. Press Play.`
+3. Output should say `Spinforge installed: 29 scripts. Press Play.`
 4. Optional, to test **saving**: the place must be published (File > Publish to Roblox, private is fine), then
    Game Settings > Security > **Enable Studio Access to API Services**. Without this the game runs and shows a
    "Progress is NOT being saved" banner; that's expected.
@@ -111,9 +111,10 @@ Actual run, 2026-10-14:
 |---|---|---|
 | `movement.test.luau` | 23 passed | ground hysteresis and seam flicker, one boost per takeoff, repeated landing signals, jump/slam rules and cooldowns, a dive that never lands, flat/lean/brake speeds, 45° slope pulls you down, 12° slope climbable, nose-up stops you, variable timesteps (30 vs 240 fps), zero input, NaN/inf/extreme values, facing at near-zero speed, orthonormal frames, stuck detection |
 | `combat.test.luau` | 13 passed | spin pools and drain, damage bounds and stat roles, contact geometry, continuous-contact de-duplication, hit cooldown, knockback bounds, slam fall/range checks, fall tracker window, ring-out and its grace, rate limiter, invalid numbers |
-| `battle.test.luau` | 12 passed | countdown, stop, ring-out, simultaneous defeat = draw, timeout win/draw, finish happens once, leaving, rewards claimable once, cleanup by request and by timeout, drain with bad dt |
+| `battle.test.luau` | 13 passed | countdown, stop, ring-out, simultaneous defeat = draw, timeout win/draw, finish happens once, leaving, rewards claimable once, cleanup by request and by timeout, drain with bad dt |
 | `progression.test.luau` | 17 passed | level curve, rewards (and once per battle id), invalid rewards, bounded memory, Workshop buying rules, a Legendary set is reachable (2400 Shards ≈ 80 Normal wins), equip rules, save migration (new/v0/corrupt/newer), repair of bad values, save/load round trip, retries, failed load leaves the save untouched, newer save never overwritten, session locks, stale-lock takeover with the old server's save refused, save errors reported |
-| `smoke.test.luau` | 24 passed | **real server + client scripts** in a small Roblox mock: startup, join, data load, client start, challenge → countdown (frozen) → start (ownership) → villain AI runs → one hit per contact → slam refused without a fall / accepted after one → ring-out win with one reward → rematch → forfeit pays nothing → leave restores avatar and camera → Workshop UI equip → settings saved → practice (tutorial advances when you drive) → queue → disconnect mid-battle → reset mid-battle → timeout and auto-close → save on leave → failed DataStore = unsaved temporary profile → shutdown saves → backup on-foot controls → no infinite-yield warnings or script errors |
+| `smoke.test.luau` | 25 passed | **real server + client scripts** in a small Roblox mock: startup, join, data load, client start, challenge → countdown (frozen) → start (ownership) → villain AI runs → one hit per contact → slam refused without a fall / accepted after one → ring-out win with one reward → rematch → forfeit pays nothing → leave restores avatar and camera → Workshop UI equip → settings saved → practice (tutorial advances when you drive) → queue → disconnect mid-battle → reset mid-battle → timeout and auto-close → save on leave → failed DataStore = unsaved temporary profile → shutdown saves → backup on-foot controls → no infinite-yield warnings or script errors |
+| `launch.test.luau` | 7 passed | needle sweep, moving green zone, perfect/good/weak quality, press validation (stale, future, outside the meter), effects on spin/speed/boost, boost fade, villain launch skill |
 | `config.test.luau` | passed | crate odds total 100%, 400k simulated rolls, Ultra = +10%, designs and mesh data for every part |
 | bad crate odds | passed | a crate whose odds total 100.01% refuses to load |
 | installer check | passed | the committed installer matches `src/` |
@@ -141,7 +142,7 @@ Actual run, 2026-10-14:
 
 Note the result of each step (✓ / ✗ + a screenshot of anything red in Output).
 
-1. **Install** (Command Bar). Output: `Spinforge installed: 28 scripts.` Press Play.
+1. **Install** (Command Bar). Output: `Spinforge installed: 29 scripts.` Press Play.
 2. **Startup.** Output shows `Spinforge server ready: world built, N of 66 bey meshes available…` with no red text.
    You spawn on the blue pad in the hub. The arena is right beside it; the training bowl is further out (you are teleported to both).
 3. **Walk.** WASD moves your avatar and the camera follows. If you see "Backup controls on", note it: your

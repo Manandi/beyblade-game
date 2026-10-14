@@ -13,7 +13,7 @@ milestones: [PROJECT.md](PROJECT.md). Read it before changing anything.
 ## Try it in Studio
 
 1. Open [`install_in_studio.lua`](install_in_studio.lua), copy all of it, paste it into Studio's **Command Bar**
-   (not in Play mode) and run it. It prints `Spinforge installed: 28 scripts.`
+   (not in Play mode) and run it. It prints `Spinforge installed: 29 scripts.`
    If the big paste fails, run `installer_parts/part_1.lua` to `part_7.lua` in order instead.
 2. Press **Play**. You start on foot in the hub: **Practice** (green), **Battle** (red), **Workshop** (gold).
 3. To test saving, publish the place and turn on Game Settings > Security > Enable Studio Access to API Services.
