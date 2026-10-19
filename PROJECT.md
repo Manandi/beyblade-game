@@ -14,6 +14,44 @@ This repo started inside the owner's `Manandi/god` repo (the Hollow Roots game) 
 - Ultra Legendary parts are 10% above the best grindable part.
 - Mobile and console controls are required (thumbstick tilt), not an afterthought.
 
+## The Tower plan (owner, 2026-10-19) — the target game
+
+**Working name from the owner: "Beyblade Tower".** "Beyblade" is a trademark, so the shipped title needs another
+word (for example *Spin Tower* or *Spinforge Tower*). This is the owner's call; it's flagged here so it gets decided
+before publishing.
+
+**Goal of the game:** climb to the top of the tower.
+
+**Lobby (spawn).** A cool, modern tower lobby with three labelled doors:
+- **Climb** — story mode: floor by floor up the tower (each floor a villain or challenge; today's Rook battle is
+  floor 1's template).
+- **PvP** — leads to a hall of **6 doors**, one per PvP mode.
+- **Shop** — a proper shop room with bey parts displayed on the walls (today's Workshop moves here).
+
+**PvP modes (owner's ideas so far; 4 of the 6 doors):**
+1. **1v1 bracket tournament** — 32 players.
+2. **Bey race** — 6 players.
+3. **25-player deathmatch** — last bey spinning.
+4. **3v3 team battles.**
+5. and 6. *to be decided.*
+
+**Rewards:** PvP wins give **more XP and coins** than story.
+
+**Things to settle before building PvP** (from this project's earlier decisions and review):
+- **Server Authority first.** All PvP needs it (client-owned physics lets cheaters fake hits). It's the biggest
+  piece of work and comes before any PvP mode.
+- **Player counts vs. players online.** A 32-player bracket and a 25-player match need that many people waiting at
+  once. Plan for bots filling empty slots, and start with the small modes (1v1, 3v3, 6-player race).
+- **Server size.** 25 or 32 players plus spectators in one server; check Roblox's current max-players limits and
+  performance with that many physics beys.
+- **Reward farming.** Bigger PvP rewards invite win-trading and AFK farming: cap rewards per hour, no rewards
+  against the same opponent repeatedly, minimum match length (story already has this).
+- **Ultra Legendary in ranked play:** the review recommended normalised stats in competitive modes.
+- **Coins vs. Shards:** "coins" = the earned currency (today called Shards); keep one earned currency.
+
+**Suggested build order:** lobby + doors (reuse the hub) → Climb floors 1–3 (reuse the battle) → shop room →
+Server Authority → 1v1 PvP → 3v3 → race → bracket → deathmatch.
+
 ## Decisions made
 
 | Topic | Decision |
