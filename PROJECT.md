@@ -167,12 +167,20 @@ the anime's real part terms; we don't).
   overhead battle camera; (2) trails, hit sparks, launch pillar, bloom; (3) stadium restyle; (4) launch bar shows a %
   score and rounds become best-of-3; (5) two specials + Awakening meter/ultimate; (6) WINNER/LOSE pops and loadout cards.
 
-## Milestones
+### Built from the reference analysis (2026-10-27, owner's picks)
+Owner: "our stadium is good, and our fight from the bey view is also good". So both stay, and overhead is a toggle (V).
+Also wanted: the clean loadout, special moves that make the creature appear, and impact/fighting that hits hard. Built:
+heavy hit effects, trails, the overhead toggle, specials (keys 1/2) and Awakening (R) with spirit creatures (Blender
+meshes + fallback), the villain using them too, and the card-grid Loadout with Spirits/Specials tabs (save v2).
+Not built yet: best-of-3 rounds, sound ids, PvP versions. **Unverified in Studio.** See HANDOFF.md "Update 2026-10-27".
+
+## Milestones## Milestones
 
 1. **Tilt, launch and slam feel** on one stadium. *(playtested; feel tuned twice)*
 2. **Spin and stamina**, meaningful stats, ring-outs. *(built on `pve-loop`, needs a Studio playtest)*
 3. **One AI villain**, battle win/lose flow, on-foot hub, practice, rematch. *(built on `pve-loop`, needs a playtest)*
 4. **Earnable progression and saving:** XP, Shards, Workshop, equip, DataStore with session locks. *(built on `pve-loop`; live saving unverified)*
 5. **Tilt-aware combat hit geometry** (keep the ball for movement). *(next experiment; see HANDOFF.md)*
-6. **Paid crates**, only after the checklist in Decisions. *(deferred)*
-7. **Open world and story**, more villains; then PvP on Server Authority and the ranked-stats decision. *(deferred)*
+6. **Battle presentation, specials and spirits, loadout screen.** *(built 2026-10-27 on `pve-loop`; needs a playtest)*
+7. **Paid crates**, only after the checklist in Decisions. *(deferred)*
+8. **Open world and story**, more villains; then PvP on Server Authority and the ranked-stats decision. *(deferred)*

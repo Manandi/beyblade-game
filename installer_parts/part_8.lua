@@ -31,6 +31,355 @@ local function install(rootKey, path, class, name, source)
 	s.Source = source
 	s.Parent = parent
 end
+install('SPS', '', 'LocalScript', 'Main', [=====[
+--!nonstrict
+-- Spinforge client entry point. Builds the HUD first (so problems can be shown on screen), waits a bounded time
+-- for the server's remotes, then starts the menus, tutorial, effects and bey controller.
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local Workspace = game:GetService("Workspace")
+
+local player = Players.LocalPlayer
+local Hud = require(script.Parent.Hud)
+local hud = Hud.new(player)
+
+local Shared = ReplicatedStorage:WaitForChild("Spinforge", 20)
+if not Shared then
+	hud:showError("ReplicatedStorage.Spinforge is missing. Run install_in_studio.lua again.")
+	return
+end
+local Net = require(Shared.Net)
+local remotes, err = Net.waitFor(ReplicatedStorage, 20)
+if not remotes then
+	hud:showError(err)
+	return
+end
+
+local Effects = require(script.Parent.Effects)
+local Menus = require(script.Parent.Menus)
+local Tutorial = require(script.Parent.Tutorial)
+local Controller = require(script.Parent.Controller)
+local LaunchCore = require(Shared.Core.LaunchCore)
+local GameConfig = require(Shared.GameConfig)
+local BeyConfig = require(Shared.BeyConfig)
+local Spirits = require(script.Parent.Spirits)
+local SpecialsHud = require(script.Parent.SpecialsHud)
+local Sounds = require(script.Parent.Sounds)
+
+local profile = nil
+local function settings()
+	return profile and profile.Settings or { CameraShake = true, ReducedEffects = false, TutorialDone = true }
+end
+
+local effects = Effects.new(settings)
+local menus = Menus.new(hud, remotes)
+local tutorial = Tutorial.new(hud, remotes)
+Controller.start({ remotes = remotes, hud = hud, effects = effects, tutorial = tutorial })
+
+-- Specials: keys 1 / 2 (gamepad X / Y), Awakening: R (gamepad LB). Also clickable on the HUD cards.
+local function battleActive()
+	return player:GetAttribute("Mode") == "Battle" and player:GetAttribute("BattleState") == "active"
+end
+local function useSpecial(index)
+	if battleActive() then
+		remotes.Request:FireServer({ action = "special", index = index })
+	end
+end
+local function awaken()
+	if battleActive() then
+		remotes.Request:FireServer({ action = "awaken" })
+	end
+end
+local specialsHud = SpecialsHud.new(hud, useSpecial, awaken)
+local spirits = Spirits.new(effects, {
+	cinematic = function(duration, zoom)
+		Controller.cinematic(duration, zoom)
+	end,
+	banner = function(text, color, small)
+		specialsHud:showBanner(text, color, small)
+	end,
+})
+-- The game has no tools: hide Roblox's hotbar so it doesn't take the number keys.
+pcall(function()
+	game:GetService("StarterGui"):SetCoreGuiEnabled(Enum.CoreGuiType.Backpack, false)
+end)
+UserInputService.InputBegan:Connect(function(input, processed)
+	if not battleActive() or UserInputService:GetFocusedTextBox() then
+		return
+	end
+	local kc = input.KeyCode
+	local numberKey = kc == Enum.KeyCode.One or kc == Enum.KeyCode.Two or kc == Enum.KeyCode.KeypadOne or kc == Enum.KeyCode.KeypadTwo
+	if processed and not numberKey then
+		return
+	end
+	if kc == Enum.KeyCode.One or kc == Enum.KeyCode.KeypadOne or kc == Enum.KeyCode.ButtonX then
+		useSpecial(1)
+	elseif kc == Enum.KeyCode.Two or kc == Enum.KeyCode.KeypadTwo or kc == Enum.KeyCode.ButtonY then
+		useSpecial(2)
+	elseif kc == Enum.KeyCode.R or kc == Enum.KeyCode.ButtonL1 then
+		awaken()
+	end
+end)
+require(script.Parent.OnFootFallback).start({ hud = hud, isBound = function()
+	return Controller.isBound()
+end })
+
+remotes.Profile.OnClientEvent:Connect(function(p)
+	if type(p) ~= "table" then
+		return
+	end
+	profile = p
+	hud:setProfile(p)
+	menus:setProfile(p)
+	tutorial:setProfile(p)
+end)
+hud:setProfile({ Level = 1, XP = 0, Shards = 0, Record = { Wins = 0, Losses = 0, Draws = 0 }, SaveStatus = "loading" })
+
+remotes.Toast.OnClientEvent:Connect(function(text)
+	if type(text) == "string" then
+		hud:toast(text)
+	end
+end)
+
+-- Mode changes (set by the server): HUD layout and the mode button (Forfeit / Back to hub).
+local function onMode()
+	local m = player:GetAttribute("Mode") or "OnFoot"
+	hud:setMode(m, nil)
+	if m ~= "OnFoot" then
+		menus:close()
+		menus:closeSettings()
+	end
+end
+player:GetAttributeChangedSignal("Mode"):Connect(onMode)
+onMode()
+hud.modeBtn.Activated:Connect(function()
+	local m = player:GetAttribute("Mode")
+	if m == "Practice" then
+		remotes.Request:FireServer({ action = "exitPractice" })
+	elseif m == "Battle" and (player:GetAttribute("BattleState") == "active" or player:GetAttribute("BattleState") == "countdown") then
+		remotes.Request:FireServer({ action = "forfeit" })
+	end
+end)
+
+local beys = Workspace:WaitForChild("Beys", 30)
+effects:trackBeys(beys)
+
+-- The Body of "player" (yours) or "villain".
+local function beyBody(who)
+	if not beys then
+		return nil
+	end
+	if who == "player" then
+		local m = beys:FindFirstChild(tostring(player.UserId))
+		return m and m:FindFirstChild("Body")
+	end
+	for _, m in ipairs(beys:GetChildren()) do
+		if m:GetAttribute("Villain") then
+			return m:FindFirstChild("Body")
+		end
+	end
+	return nil
+end
+
+-- Battle events.
+local inBattle = false
+remotes.BattleEvent.OnClientEvent:Connect(function(e)
+	if type(e) ~= "table" then
+		return
+	end
+	if e.kind == "queued" then
+		hud:queued(e.position)
+	elseif e.kind == "countdown" then
+		inBattle = true
+		hud:closeBattle()
+		hud:countdown(e.seconds or 3, e.foe, e.difficulty)
+		specialsHud:setLoadout(type(e.loadout) == "table" and e.loadout.specials or nil)
+		specialsHud:show(true)
+		if type(e.meter) == "table" then
+			hud:showLaunch(e.meter)
+		end
+	elseif e.kind == "launchLocked" then
+		-- the server's verdict (normally the same as what we showed)
+		hud:lockLaunch(nil, e.label or "WEAK", e.quality)
+	elseif e.kind == "started" then
+		hud:started(e.launch, e.foeLaunch)
+		Sounds.play("Launch", 0.8)
+		if type(e.launch) == "table" then
+			Controller.launch(e.launch.speed, e.launch.boost)
+		end
+	elseif e.kind == "hit" then
+		if (e.taken or 0) > 0.5 then
+			hud:popup(("-%d"):format(math.floor(e.taken + 0.5)), Color3.fromRGB(255, 110, 110), false)
+			hud:flash(Color3.fromRGB(255, 60, 60), e.strength or 0.5)
+		end
+		if (e.dealt or 0) > 0.5 then
+			hud:popup(("-%d"):format(math.floor(e.dealt + 0.5)), Color3.fromRGB(255, 255, 255), true)
+		end
+		if typeof(e.at) == "Vector3" then
+			local crit = e.crit == true or e.foeCrit == true
+			effects:impact(e.at, typeof(e.normal) == "Vector3" and e.normal or nil, e.strength or 0.5, {
+				crit = crit,
+				color = crit and Color3.fromRGB(255, 170, 80) or nil,
+			})
+			if e.crit then
+				specialsHud:showBanner("CRITICAL!", Color3.fromRGB(255, 170, 60), true)
+			end
+		end
+	elseif e.kind == "slam" then
+		if e.hit then
+			hud:toast((e.dealt and e.dealt > 0) and ("SLAM! -%d"):format(math.floor(e.dealt + 0.5)) or "SLAM!", Color3.fromRGB(255, 200, 120))
+		end
+	elseif e.kind == "villainSlam" then
+		if typeof(e.at) == "Vector3" then
+			effects:slamRing(e.at - Vector3.new(0, 1.8, 0), 1, Color3.fromRGB(255, 80, 80))
+		end
+	elseif e.kind == "special" then
+		local body = beyBody(e.who)
+		local def = BeyConfig.Specials[e.id or ""]
+		local color = def and def.Color or Color3.new(1, 1, 1)
+		spirits:summon({ spirit = e.spirit, body = body, kind = "special", special = e.special, dir = e.dir, id = e.id, big = e.who == "player" })
+		Sounds.play(e.special == "quake" and "Quake" or e.special == "guard" and "Guard" or "Special", 0.8)
+		if e.who == "player" and e.dash then
+			Controller.dash(e.dash, e.dir)
+		end
+		if e.special == "quake" and typeof(e.at) == "Vector3" then
+			effects:burst(e.at - Vector3.new(0, 1.8, 0), color, def and def.Tuning.Radius or 14)
+			effects:shake(0.8)
+		end
+		if (e.healed or 0) > 0.5 then
+			hud:popup(("+%d"):format(math.floor(e.healed + 0.5)), Color3.fromRGB(120, 255, 160), e.who ~= "player")
+		end
+		if e.hit and (e.dealt or 0) > 0.5 then
+			hud:popup(("-%d"):format(math.floor(e.dealt + 0.5)), e.who == "player" and Color3.new(1, 1, 1) or Color3.fromRGB(255, 110, 110), e.who == "player")
+		end
+	elseif e.kind == "awaken" then
+		local def = BeyConfig.Spirits[e.spirit or ""]
+		local color = def and def.Color or Color3.new(1, 1, 1)
+		spirits:summon({
+			spirit = e.spirit,
+			body = beyBody(e.who),
+			kind = "awaken",
+			duration = e.duration,
+			big = e.who == "player",
+			face = function()
+				local other = beyBody(e.who == "player" and "villain" or "player")
+				return other and other.Position or nil
+			end,
+		})
+		specialsHud:wash(color, e.who == "player" and 0.45 or 0.25)
+		effects:shake(e.who == "player" and 1 or 0.6)
+		Sounds.play("Awaken", 1)
+	elseif e.kind == "specials" then
+		specialsHud:update(e.you, e.foe)
+		if type(e.you) == "table" then
+			Controller.setSpeedMultiplier(e.you.speed or 1)
+		end
+	elseif e.kind == "specialRefused" then
+		specialsHud:refused(e.index)
+	elseif e.kind == "finished" then
+		local won = e.outcome == "win"
+		specialsHud:showBanner(won and "WINNER!" or e.outcome == "loss" and "DEFEATED" or "DRAW", won and Color3.fromRGB(255, 220, 90) or Color3.fromRGB(255, 110, 110), false)
+		Sounds.play(won and "Win" or "Lose", 0.9)
+		hud:showResult(e, function()
+			remotes.Request:FireServer({ action = "rematch" })
+		end, function()
+			remotes.Request:FireServer({ action = "leave" })
+		end)
+	elseif e.kind == "closed" then
+		inBattle = false
+		hud:closeBattle()
+		specialsHud:show(false)
+		spirits:clear()
+		Controller.setSpeedMultiplier(1)
+	elseif e.kind == "openWorkshop" then
+		menus:open()
+	end
+end)
+
+-- Launch meter: the needle runs on the shared server clock; one press locks it and tells the server when.
+local function pressLaunch()
+	local meter = hud.launchMeter
+	if not meter or hud.launchLocked then
+		return
+	end
+	local t = Workspace:GetServerTimeNow()
+	local pos = LaunchCore.needle(meter, t)
+	local q, label = LaunchCore.quality(meter, pos, GameConfig.Launch)
+	hud:lockLaunch(pos, label, q)
+	remotes.Request:FireServer({ action = "launch", t = t })
+end
+UserInputService.InputBegan:Connect(function(input, processed)
+	if processed or not hud.launchMeter then
+		return
+	end
+	local kc = input.KeyCode
+	if kc == Enum.KeyCode.Space or kc == Enum.KeyCode.ButtonA or kc == Enum.KeyCode.ButtonR2 or input.UserInputType == Enum.UserInputType.MouseButton1 then
+		pressLaunch()
+	end
+end)
+hud.touchLaunch.Activated:Connect(pressLaunch)
+RunService.RenderStepped:Connect(function()
+	local meter = hud.launchMeter
+	if meter and not hud.launchLocked then
+		hud:setNeedle(LaunchCore.needle(meter, Workspace:GetServerTimeNow()))
+	end
+end)
+
+-- Live battle bars from the beys' Spin attributes (set by the server).
+RunService.RenderStepped:Connect(function()
+	if not inBattle or not beys then
+		return
+	end
+	local mine = beys:FindFirstChild(tostring(player.UserId))
+	local foe
+	for _, m in ipairs(beys:GetChildren()) do
+		if m:GetAttribute("Villain") then
+			foe = m
+			break
+		end
+	end
+	local mb = mine and mine:FindFirstChild("Body")
+	local fb = foe and foe:FindFirstChild("Body")
+	if mb and fb then
+		hud:updateBattle(mb:GetAttribute("Spin") or 0, mb:GetAttribute("MaxSpin") or 1, fb:GetAttribute("Spin") or 0, fb:GetAttribute("MaxSpin") or 1, player:GetAttribute("BattleEndsAt"), player:GetAttribute("BattleState"))
+	end
+end)
+
+-- F6: diagnostics.
+local diagOn = false
+UserInputService.InputBegan:Connect(function(input, processed)
+	if not processed and input.KeyCode == Enum.KeyCode.F6 then
+		diagOn = not diagOn
+		if not diagOn then
+			hud:setDiag(nil)
+		end
+	end
+end)
+local frames, fps, fpsAt = 0, 0, os.clock()
+RunService.RenderStepped:Connect(function()
+	frames += 1
+	local now = os.clock()
+	if now - fpsAt >= 0.5 then
+		fps = frames / (now - fpsAt)
+		frames, fpsAt = 0, now
+		if diagOn then
+			local beyCount = beys and #beys:GetChildren() or 0
+			hud:setDiag(("FPS %.0f\nmode %s  battle %s\nbeys in world %d  effects active %d\nsave %s\n%s"):format(
+				fps,
+				tostring(player:GetAttribute("Mode")),
+				tostring(player:GetAttribute("BattleState") or "-"),
+				beyCount,
+				effects:count(),
+				profile and profile.SaveStatus or "loading",
+				Controller.diag()
+			))
+		end
+	end
+end)
+]=====])
 install('SPS', '', 'ModuleScript', 'Menus', [=====[
 --!nonstrict
 -- Menus: the Loadout (parts, spirit and specials: buy with Shards, equip, see your bey) and Settings.
@@ -587,385 +936,5 @@ function Menus:closeSettings()
 end
 
 return Menus
-]=====])
-install('SPS', '', 'ModuleScript', 'OnFootFallback', [=====[
---!nonstrict
--- OnFootFallback: a backup for walking around the hub, used ONLY if Roblox's own PlayerModule (the default
--- walking + camera scripts) never loads. That happened once in the owner's Studio, and without it you can't walk
--- or move the camera. Provides: WASD / left stick walking (camera-relative), Space / A to jump, and a follow
--- camera (hold right mouse or use the right stick to orbit). Steps aside whenever a bey is being controlled.
-
-local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
-local UserInputService = game:GetService("UserInputService")
-local Workspace = game:GetService("Workspace")
-
-local OnFootFallback = {}
-
-function OnFootFallback.start(ctx)
-	local player = Players.LocalPlayer
-	local hud, isBound = ctx.hud, ctx.isBound
-	task.spawn(function()
-		local module = player:WaitForChild("PlayerScripts"):WaitForChild("PlayerModule", 10)
-		if module then
-			return -- the normal controls are there; nothing to do
-		end
-		warn("Spinforge: Roblox's PlayerModule didn't load; using backup on-foot controls.")
-		hud:toast("Backup controls on: WASD to walk, Space to jump, hold right mouse to look")
-		local camera = Workspace.CurrentCamera
-		local yaw, pitch = 0, 0.35
-
-		UserInputService.InputBegan:Connect(function(input, processed)
-			if processed or isBound() or UserInputService:GetFocusedTextBox() then
-				return
-			end
-			if input.KeyCode == Enum.KeyCode.Space or input.KeyCode == Enum.KeyCode.ButtonA then
-				local hum = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
-				if hum then
-					hum.Jump = true
-				end
-			end
-		end)
-
-		RunService:BindToRenderStep("SpinforgeOnFoot", Enum.RenderPriority.Camera.Value + 2, function(dt)
-			if isBound() then
-				return
-			end
-			local char = player.Character
-			local hum = char and char:FindFirstChildOfClass("Humanoid")
-			local root = char and char:FindFirstChild("HumanoidRootPart")
-			if not (hum and root) then
-				return
-			end
-			-- look around
-			local orbiting = UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) and not hud:mouseFree()
-			UserInputService.MouseBehavior = orbiting and Enum.MouseBehavior.LockCurrentPosition or Enum.MouseBehavior.Default
-			if orbiting then
-				local d = UserInputService:GetMouseDelta()
-				yaw -= d.X * 0.005
-				pitch = math.clamp(pitch + d.Y * 0.005, -0.2, 1.2)
-			end
-			for _, state in ipairs(UserInputService:GetGamepadState(Enum.UserInputType.Gamepad1)) do
-				if state.KeyCode == Enum.KeyCode.Thumbstick2 and state.Position.Magnitude > 0.15 then
-					yaw -= state.Position.X * 2.5 * dt
-					pitch = math.clamp(pitch - state.Position.Y * 1.5 * dt, -0.2, 1.2)
-				end
-			end
-			-- walk (camera-relative)
-			local x, z = 0, 0
-			if not UserInputService:GetFocusedTextBox() and not hud:mouseFree() then
-				local K = Enum.KeyCode
-				x = (UserInputService:IsKeyDown(K.D) and 1 or 0) - (UserInputService:IsKeyDown(K.A) and 1 or 0)
-				z = (UserInputService:IsKeyDown(K.S) and 1 or 0) - (UserInputService:IsKeyDown(K.W) and 1 or 0)
-				for _, state in ipairs(UserInputService:GetGamepadState(Enum.UserInputType.Gamepad1)) do
-					if state.KeyCode == Enum.KeyCode.Thumbstick1 and state.Position.Magnitude > 0.15 then
-						x += state.Position.X
-						z -= state.Position.Y
-					end
-				end
-			end
-			local flat = CFrame.Angles(0, yaw, 0)
-			local dir = flat.RightVector * x + flat.LookVector * -z
-			hum:Move(dir.Magnitude > 1 and dir.Unit or dir, false)
-			-- follow camera
-			camera.CameraType = Enum.CameraType.Scriptable
-			local focus = root.Position + Vector3.new(0, 2, 0)
-			local eye = (CFrame.new(focus) * CFrame.Angles(0, yaw, 0) * CFrame.Angles(-pitch, 0, 0) * CFrame.new(0, 0, 16)).Position
-			camera.CFrame = CFrame.lookAt(eye, focus)
-		end)
-	end)
-end
-
-return OnFootFallback
-]=====])
-install('SPS', '', 'ModuleScript', 'Sounds', [=====[
---!nonstrict
--- Sounds: one place for every sound effect id. Empty ids are skipped (silent), so the game runs without any.
--- To add sound: in Studio open the Toolbox > Audio (or the Creator Store), pick Roblox-made or your own uploaded
--- sounds, copy the number from the asset URL and put "rbxassetid://<number>" here. Audio uploaded by other
--- people usually won't play in your game (Roblox audio privacy), so prefer Roblox's own SFX or your uploads.
-
-local SoundService = game:GetService("SoundService")
-
-local Sounds = {}
-
-Sounds.Ids = {
-	Hit = "", -- metal clash, short
-	HitHeavy = "", -- bigger clash with a ring (empowered hits)
-	Launch = "", -- ripcord whoosh at LET IT RIP
-	Special = "", -- whoosh / roar when a special is used
-	Awaken = "", -- big roar + choir hit
-	Quake = "", -- deep boom
-	Guard = "", -- shield hum
-	Win = "", -- victory sting
-	Lose = "", -- defeat sting
-}
-
--- Plays a sound once (2D, not positional). volume 0..1, pitch ~1.
-function Sounds.play(name, volume, pitch)
-	local id = Sounds.Ids[name]
-	if not id or id == "" then
-		return
-	end
-	local ok = pcall(function()
-		local s = Instance.new("Sound")
-		s.SoundId = id
-		s.Volume = volume or 0.6
-		s.PlaybackSpeed = pitch or 1
-		s.Parent = SoundService
-		s.Ended:Connect(function()
-			s:Destroy()
-		end)
-		s:Play()
-	end)
-	return ok
-end
-
-return Sounds
-]=====])
-install('SPS', '', 'ModuleScript', 'SpecialsHud', [=====[
---!nonstrict
--- SpecialsHud: the battle bar for special moves and Awakening, plus the big title banners.
---   [1] Comet Drive  READY      [2] Iron Shell  6s        cards (tap/click to use too)
---   AWAKENING ███████░░░ 64%    full: "AWAKEN READY  [R]" pulsing; awake: "AWAKENED" draining
--- The server sends snapshots (cooldowns, meter) a few times a second; this only draws them.
-
-local TweenService = game:GetService("TweenService")
-local UserInputService = game:GetService("UserInputService")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-
-local Shared = ReplicatedStorage:WaitForChild("Spinforge")
-local BeyConfig = require(Shared.BeyConfig)
-local Ui = require(script.Parent.Ui)
-local C = Ui.C
-
-local SpecialsHud = {}
-SpecialsHud.__index = SpecialsHud
-
-local KIND_TEXT = { dash = "ATTACK", guard = "DEFENSE", heal = "RECOVER", quake = "SHOCKWAVE" }
-
-local function keyText(i)
-	if UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled then
-		return ""
-	end
-	if UserInputService.GamepadEnabled and not UserInputService.KeyboardEnabled then
-		return i == 1 and "X" or i == 2 and "Y" or "LB"
-	end
-	return i == 1 and "1" or i == 2 and "2" or "R"
-end
-
-function SpecialsHud.new(hud, onUse, onAwaken)
-	local self = setmetatable({}, SpecialsHud)
-	self.hud = hud
-	local gui = hud.gui
-	local root = Ui.make("Frame", {
-		Name = "Specials",
-		AnchorPoint = Vector2.new(0.5, 1),
-		Position = UDim2.new(0.5, 0, 1, -60),
-		Size = UDim2.fromOffset(470, 92),
-		BackgroundTransparency = 1,
-		Visible = false,
-	}, gui)
-	self.root = root
-	self.cards = {}
-	for i = 1, 2 do
-		local card = Ui.make("TextButton", {
-			Position = UDim2.new((i - 1) * 0.5, i == 2 and 5 or 0, 0, 0),
-			Size = UDim2.new(0.5, -5, 0, 52),
-			BackgroundColor3 = C.panel,
-			BackgroundTransparency = 0.08,
-			AutoButtonColor = false,
-			Text = "",
-			Selectable = false,
-		}, root)
-		Ui.corner(card, 10)
-		local stroke = Ui.stroke(card, C.line, 2)
-		local fill = Ui.make("Frame", { Size = UDim2.fromScale(0, 1), BackgroundColor3 = Color3.new(0, 0, 0), BackgroundTransparency = 0.45, BorderSizePixel = 0, ZIndex = 3 }, card)
-		Ui.corner(fill, 10)
-		local key = Ui.label(card, {
-			Position = UDim2.fromOffset(8, 10),
-			Size = UDim2.fromOffset(32, 32),
-			BackgroundTransparency = 0,
-			BackgroundColor3 = C.panel2,
-			Font = Enum.Font.GothamBlack,
-			TextSize = 18,
-			TextXAlignment = Enum.TextXAlignment.Center,
-			Text = keyText(i),
-			ZIndex = 4,
-		})
-		Ui.corner(key, 7)
-		local name = Ui.label(card, { Position = UDim2.fromOffset(48, 7), Size = UDim2.new(1, -54, 0, 20), Font = Enum.Font.GothamBlack, TextSize = 16, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 4 })
-		local status = Ui.label(card, { Position = UDim2.fromOffset(48, 28), Size = UDim2.new(1, -54, 0, 16), Font = Enum.Font.GothamBold, TextSize = 12, TextColor3 = C.muted, ZIndex = 4 })
-		card.Activated:Connect(function()
-			onUse(i)
-		end)
-		self.cards[i] = { frame = card, stroke = stroke, fill = fill, key = key, name = name, status = status, ready = false }
-	end
-	local meterBack = Ui.make("Frame", { Position = UDim2.fromOffset(0, 60), Size = UDim2.new(1, 0, 0, 26), BackgroundColor3 = C.panel, BackgroundTransparency = 0.08, BorderSizePixel = 0 }, root)
-	Ui.corner(meterBack, 8)
-	Ui.stroke(meterBack, C.line, 1)
-	self.meterFill = Ui.make("Frame", { Size = UDim2.fromScale(0, 1), BackgroundColor3 = C.gold, BorderSizePixel = 0 }, meterBack)
-	Ui.corner(self.meterFill, 8)
-	Ui.make("UIGradient", { Color = ColorSequence.new(Color3.fromRGB(255, 170, 40), Color3.fromRGB(255, 240, 150)) }, self.meterFill)
-	self.meterText = Ui.make("TextButton", {
-		Size = UDim2.fromScale(1, 1),
-		BackgroundTransparency = 1,
-		Font = Enum.Font.GothamBlack,
-		TextSize = 14,
-		TextColor3 = C.text,
-		TextStrokeTransparency = 0.4,
-		Text = "AWAKENING 0%",
-		AutoButtonColor = false,
-		Selectable = false,
-		ZIndex = 3,
-	}, meterBack)
-	self.meterText.Activated:Connect(onAwaken)
-	self.meterStroke = meterBack:FindFirstChildOfClass("UIStroke")
-
-	-- foe's awakening (thin bar under the foe's spin bar)
-	self.foeMeter = Ui.bar(hud.battleFrame, { Position = UDim2.new(0.58, 0, 1, -4), Size = UDim2.new(0.42, 0, 0, 4) }, C.gold)
-
-	-- big title banner (special names, AWAKENS!, WINNER)
-	local banner = Ui.make("TextLabel", {
-		AnchorPoint = Vector2.new(0.5, 0.5),
-		Position = UDim2.fromScale(0.5, 0.27),
-		Size = UDim2.fromOffset(900, 80),
-		BackgroundTransparency = 1,
-		Font = Enum.Font.LuckiestGuy,
-		TextSize = 64,
-		TextColor3 = Color3.new(1, 1, 1),
-		Text = "",
-		Visible = false,
-		ZIndex = 15,
-	}, gui)
-	self.bannerStroke = Ui.make("UIStroke", { Thickness = 4, Color = Color3.fromRGB(20, 10, 30), ApplyStrokeMode = Enum.ApplyStrokeMode.Contextual }, banner)
-	self.bannerGradient = Ui.make("UIGradient", { Rotation = 90 }, banner)
-	self.banner = banner
-	self.bannerScale = Ui.make("UIScale", { Scale = 1 }, banner)
-
-	-- screen tint for awakenings
-	self.tint = Ui.make("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, BorderSizePixel = 0, ZIndex = 1 }, gui)
-	return self
-end
-
--- Called when a battle starts: which specials this player brought.
-function SpecialsHud:setLoadout(ids)
-	for i, card in ipairs(self.cards) do
-		local def = BeyConfig.Specials[ids and ids[i] or ""]
-		card.def = def
-		card.name.Text = def and def.Name or "Empty"
-		card.name.TextColor3 = def and def.Color or C.muted
-		card.status.Text = def and KIND_TEXT[def.Kind] or ""
-		card.key.Text = keyText(i)
-		card.fill.Size = UDim2.fromScale(1, 1)
-	end
-	self.meterFill.Size = UDim2.fromScale(0, 1)
-	self.meterText.Text = "AWAKENING 0%   [" .. keyText(3) .. "]"
-	self.awakeUntil = nil
-end
-
-function SpecialsHud:show(visible)
-	self.root.Visible = visible
-	if not visible then
-		self.tint.BackgroundTransparency = 1
-	end
-end
-
--- snap = { specials = { { left, cooldown } x2 }, meter = 0..1, awakened, awakenUsed } from the server.
-function SpecialsHud:update(snap, foe)
-	if type(snap) == "table" and type(snap.specials) == "table" then
-		for i, card in ipairs(self.cards) do
-			local s = snap.specials[i]
-			if s and card.def then
-				local left = tonumber(s.left) or 0
-				local cd = math.max(tonumber(s.cooldown) or 1, 0.01)
-				local ready = left <= 0.05
-				card.fill.Size = UDim2.fromScale(ready and 0 or math.clamp(left / cd, 0, 1), 1)
-				card.status.Text = ready and ("READY  ·  " .. KIND_TEXT[card.def.Kind]) or ("%.1fs"):format(left)
-				card.status.TextColor3 = ready and C.good or C.muted
-				card.stroke.Color = ready and card.def.Color or C.line
-				if ready and not card.ready then
-					card.frame.Size = UDim2.new(0.5, -5, 0, 58)
-					TweenService:Create(card.frame, TweenInfo.new(0.2), { Size = UDim2.new(0.5, -5, 0, 52) }):Play()
-				end
-				card.ready = ready
-			end
-		end
-		local m = math.clamp(tonumber(snap.meter) or 0, 0, 1)
-		if snap.awakened then
-			self.meterText.Text = "AWAKENED!"
-			self.meterFill.Size = UDim2.fromScale(1, 1)
-		elseif snap.awakenUsed then
-			self.meterText.Text = "AWAKENING USED"
-			self.meterFill.Size = UDim2.fromScale(0, 1)
-		elseif m >= 1 then
-			self.meterText.Text = "AWAKEN READY!   PRESS [" .. keyText(3) .. "]"
-			self.meterFill.Size = UDim2.fromScale(1, 1)
-			if self.meterStroke then
-				self.meterStroke.Color = (math.floor(os.clock() * 3) % 2 == 0) and C.gold or C.line
-				self.meterStroke.Thickness = 2
-			end
-		else
-			self.meterText.Text = ("AWAKENING %d%%   [%s]"):format(math.floor(m * 100), keyText(3))
-			self.meterFill.Size = UDim2.fromScale(m, 1)
-			if self.meterStroke then
-				self.meterStroke.Color = C.line
-				self.meterStroke.Thickness = 1
-			end
-		end
-	end
-	if type(foe) == "table" then
-		self.foeMeter.Size = UDim2.fromScale(foe.awakened and 1 or math.clamp(tonumber(foe.meter) or 0, 0, 1), 1)
-	end
-end
-
--- Pressed but refused (cooldown): shake the card.
-function SpecialsHud:refused(i)
-	local card = self.cards[i]
-	if not card then
-		return
-	end
-	local p = card.frame.Position
-	card.frame.Position = p + UDim2.fromOffset(6, 0)
-	TweenService:Create(card.frame, TweenInfo.new(0.15, Enum.EasingStyle.Elastic), { Position = p }):Play()
-end
-
--- Big title text: special names, "... AWAKENS!", WINNER. small = the foe's (smaller, lower).
-function SpecialsHud:showBanner(text, color, small)
-	local b = self.banner
-	b.Text = text
-	b.TextSize = small and 40 or 64
-	b.Position = UDim2.fromScale(0.5, small and 0.2 or 0.27)
-	color = color or Color3.new(1, 1, 1)
-	self.bannerGradient.Color = ColorSequence.new(Color3.new(1, 1, 1), color)
-	b.TextTransparency = 0
-	self.bannerStroke.Transparency = 0
-	b.Visible = true
-	self.bannerScale.Scale = 1.6
-	TweenService:Create(self.bannerScale, TweenInfo.new(0.25, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = 1 }):Play()
-	local token = {}
-	self._banner = token
-	task.delay(small and 1.0 or 1.3, function()
-		if self._banner ~= token then
-			return
-		end
-		TweenService:Create(b, TweenInfo.new(0.3), { TextTransparency = 1 }):Play()
-		TweenService:Create(self.bannerStroke, TweenInfo.new(0.3), { Transparency = 1 }):Play()
-		task.delay(0.32, function()
-			if self._banner == token then
-				b.Visible = false
-			end
-		end)
-	end)
-end
-
--- Coloured screen wash (awakening).
-function SpecialsHud:wash(color, strength)
-	self.tint.BackgroundColor3 = color
-	self.tint.BackgroundTransparency = 1 - (strength or 0.35)
-	TweenService:Create(self.tint, TweenInfo.new(1.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { BackgroundTransparency = 1 }):Play()
-end
-
-return SpecialsHud
 ]=====])
 print('Spinforge installer part 8 of 9 done. Now run part 9.')

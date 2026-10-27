@@ -68,11 +68,19 @@ local spirits = Spirits.new(effects, {
 		specialsHud:showBanner(text, color, small)
 	end,
 })
+-- The game has no tools: hide Roblox's hotbar so it doesn't take the number keys.
+pcall(function()
+	game:GetService("StarterGui"):SetCoreGuiEnabled(Enum.CoreGuiType.Backpack, false)
+end)
 UserInputService.InputBegan:Connect(function(input, processed)
-	if processed or not battleActive() or UserInputService:GetFocusedTextBox() then
+	if not battleActive() or UserInputService:GetFocusedTextBox() then
 		return
 	end
 	local kc = input.KeyCode
+	local numberKey = kc == Enum.KeyCode.One or kc == Enum.KeyCode.Two or kc == Enum.KeyCode.KeypadOne or kc == Enum.KeyCode.KeypadTwo
+	if processed and not numberKey then
+		return
+	end
 	if kc == Enum.KeyCode.One or kc == Enum.KeyCode.KeypadOne or kc == Enum.KeyCode.ButtonX then
 		useSpecial(1)
 	elseif kc == Enum.KeyCode.Two or kc == Enum.KeyCode.KeypadTwo or kc == Enum.KeyCode.ButtonY then

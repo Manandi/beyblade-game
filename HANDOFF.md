@@ -7,18 +7,77 @@ equip an upgrade → rematch. `main` is untouched and still holds your last work
 Physics, camera feel, collisions, villain behaviour on the real stadium, replication and live saving are unverified
 until you playtest (checklist below).
 
+## Update 2026-10-27: fights that look and hit like the reference games
+
+You sent two clips (a park stadium and "Bey Legacy") as the bar. Taken from them: ideas only, no names or art.
+**None of this has been run in Studio yet.** It's built and passes the automated checks below.
+
+**New in battle**
+- **Heavier hits.** Every bey-on-bey hit now has:
+  - a white flash and a light burst
+  - a shockwave ring on the floor
+  - streak sparks and flying chips
+  - camera shake, a short impact freeze (the camera holds ~0.05–0.15 s) and an FOV kick
+
+  Empowered hits (after a dash special) are bigger and show **CRITICAL!**. Tuning: `Effects.TUNE` in `src/client/Effects.lua`.
+- **Trails and floor glow** on every bey, in the colour of its layer.
+- **Camera toggle: V** (gamepad D-pad up) switches between your bey view and an **overhead stadium view**. In
+  overhead, W always means "up the screen" and the mouse only tilts. Your bey view is unchanged.
+- **Special moves (keys 1 and 2)** each summon your **spirit**, a giant glowing creature that appears over your bey, roars
+  and lunges (or guards / rises), with a big title banner and a quick camera zoom:
+  - **dash:** burst at the rival; your next hit within ~1.6 s hits x1.8
+  - **guard:** take half damage and less knockback for a few seconds
+  - **heal:** get spin back
+  - **quake:** a shockwave around you
+- **Awakening (R).** A meter fills over the fight (faster when you hit or get hit). When full, press R once per
+  battle: your spirit rises out of a glowing sigil with a pillar of light and stays with you for 10 s.
+  You get x1.25 damage and toughness, and +10% speed.
+- **Rook uses specials too.** He dashes with Comet Drive, uses Quake Stomp up close, and awakens his Thorn Stag when his meter fills.
+- **Launch bar** now shows your score as a percentage ("PERFECT! 94%"). Finishing shows a big WINNER!/DEFEATED.
+
+**New outside battle**
+- **Loadout screen** (the Workshop kiosk or the Loadout button) replaces the old list:
+  - **left:** your bey turning in 3D, stat bars, and your six slots
+  - **right:** tabs for Layers / Discs / Drivers / Spirits / Specials, a search box, and rarity-coloured cards with
+    3D previews and EQUIPPED / OWNED / price badges
+  - **bottom:** a details bar with Buy / Equip (specials: Equip to slot 1 or slot 2)
+- **5 spirits and 6 specials**, all original, sold for Shards like parts:
+  - **Spirits:** Ember Wolf, Tide Drake, Thorn Stag, Storm Roc, Sunmane Lion.
+  - **Specials:** Comet Drive, Iron Shell, Second Spin, Quake Stomp, Starbreaker Rush, Aegis Bloom.
+  - **New players start with** Ember Wolf, Comet Drive and Iron Shell.
+- **Save format v2.** Your old save keeps everything and gains the starter spirit and specials. A v1 server
+  (old install) refuses to overwrite a v2 save.
+- **Spirit creature meshes** are modelled in Blender (`tools/blender/build_spirits.py` → `assets/meshes/spirits.fbx`).
+  Import them like the bey meshes (README). Until then a simple part-built beast stands in.
+- **Sounds:** `src/client/Sounds.lua` has named slots (Hit, HitHeavy, Launch, Special, Awaken, Quake, Guard, Win,
+  Lose). They're all empty, so the game is silent there. Paste Roblox-made sound ids from the Toolbox to switch them on.
+
+**Studio checklist for this update (after the main one below)**
+1. Install. Output: `Spinforge installed: 33 scripts`. The startup line also says `N of 5 spirit meshes`.
+2. Fight Rook. When you hit, check for a flash, a ring, sparks, a tiny freeze and shake. Is it too much, or too little?
+3. Press **V** mid-fight, then V again. Can you still steer in overhead? Is the whole bowl in view?
+4. After ~3 s press **1**: the Ember Wolf should appear behind you and lunge, and you burst toward Rook.
+   Hit him within ~1.5 s for CRITICAL!. Press **1** again: the card shakes (cooldown). Press **2**: Iron Shell.
+5. Trade hits until the meter says AWAKEN READY, then press **R**. Check the sigil, the pillar, the creature staying with
+   you, and the screen wash.
+6. Watch Rook: does he dash with a Comet Drive, quake when you're close, and awaken?
+7. Open **Loadout**: do the 3D card previews show? Buy Quake Stomp (150 Shards) and equip it to slot 2.
+   Check that slot 1/slot 2 swap works and that your bey preview turns.
+8. Note anything that looks wrong (creature facing backwards? floating? too bright?). The creature's facing fix is
+   `SPIN_FIX` in `src/client/Spirits.lua`.
+
 ## Install (about 1 minute)
 
 1. Open your test place in Studio (not in Play mode).
-2. Paste `install_in_studio.lua` (215 KB) into the Command Bar and click Run.
-   If that paste fails, run `installer_parts/part_1.lua` … `part_7.lua` instead, **in order**. Each one is under 40 KB.
-3. Output should say `Spinforge installed: 29 scripts. Press Play.`
+2. Paste `install_in_studio.lua` (291 KB) into the Command Bar and click Run.
+   If that paste fails, run `installer_parts/part_1.lua` … `part_9.lua` instead, **in order**. Each one is under 40 KB.
+3. Output should say `Spinforge installed: 33 scripts. Press Play.`
 4. Optional, to test **saving**: the place must be published (File > Publish to Roblox, private is fine), then
    Game Settings > Security > **Enable Studio Access to API Services**. Without this the game runs and shows a
    "Progress is NOT being saved" banner; that's expected.
 
 The installer only replaces the three `Spinforge` folders. It removes the old flat scripts from earlier builds and
-keeps `ReplicatedStorage.BeyMeshes`, so your imported meshes survive. Running it twice gives the same result.
+keeps `ReplicatedStorage.BeyMeshes` and `SpiritMeshes`, so your imported meshes survive. Running it twice gives the same result.
 
 ## What changed (change log)
 
@@ -105,15 +164,16 @@ pip install bpy shapely mapbox_earcut   # only for tools/blender/build_beys.py, 
 python3 tools/run_tests.py               # needs `luau` on PATH (https://github.com/luau-lang/luau/releases)
 ```
 
-Actual run, 2026-10-14:
+Actual run, 2026-10-27 (all passed; counts updated for this update):
 
 | Suite | Result | What it covers |
 |---|---|---|
 | `movement.test.luau` | 23 passed | ground hysteresis and seam flicker, one boost per takeoff, repeated landing signals, jump/slam rules and cooldowns, a dive that never lands, flat/lean/brake speeds, 45° slope pulls you down, 12° slope climbable, nose-up stops you, variable timesteps (30 vs 240 fps), zero input, NaN/inf/extreme values, facing at near-zero speed, orthonormal frames, stuck detection |
 | `combat.test.luau` | 13 passed | spin pools and drain, damage bounds and stat roles, contact geometry, continuous-contact de-duplication, hit cooldown, knockback bounds, slam fall/range checks, fall tracker window, ring-out and its grace, rate limiter, invalid numbers |
 | `battle.test.luau` | 13 passed | countdown, stop, ring-out, simultaneous defeat = draw, timeout win/draw, finish happens once, leaving, rewards claimable once, cleanup by request and by timeout, drain with bad dt |
-| `progression.test.luau` | 17 passed | level curve, rewards (and once per battle id), invalid rewards, bounded memory, Workshop buying rules, a Legendary set is reachable (2400 Shards ≈ 80 Normal wins), equip rules, save migration (new/v0/corrupt/newer), repair of bad values, save/load round trip, retries, failed load leaves the save untouched, newer save never overwritten, session locks, stale-lock takeover with the old server's save refused, save errors reported |
-| `smoke.test.luau` | 25 passed | **real server + client scripts** in a small Roblox mock: startup, join, data load, client start, challenge → countdown (frozen) → start (ownership) → villain AI runs → one hit per contact → slam refused without a fall / accepted after one → ring-out win with one reward → rematch → forfeit pays nothing → leave restores avatar and camera → Workshop UI equip → settings saved → practice (tutorial advances when you drive) → queue → disconnect mid-battle → reset mid-battle → timeout and auto-close → save on leave → failed DataStore = unsaved temporary profile → shutdown saves → backup on-foot controls → no infinite-yield warnings or script errors |
+| `specials.test.luau` | 7 passed | special cooldowns and the start delay, dash empowers exactly one hit inside its window, guard duration, spirit passives, Awakening meter (bad charges ignored, capped, once per battle, boosts for its duration), HUD snapshot, `BattleCore.heal` |
+| `progression.test.luau` | 19 passed | level curve, rewards (and once per battle id), invalid rewards, bounded memory, Workshop buying rules, a Legendary set is reachable (2400 Shards ≈ 80 Normal wins), equip rules, save migration (new/v0/corrupt/newer), repair of bad values, save/load round trip, retries, failed load leaves the save untouched, newer save never overwritten, session locks, stale-lock takeover with the old server's save refused, save errors reported |
+| `smoke.test.luau` | 27 passed | **real server + client scripts** in a small Roblox mock: specials used through the server (cooldown refuses spam, dash moves your bey, the creature appears and goes away, villain awakening and quake handled), Awakening only with a full meter and never twice, V camera toggle goes overhead and back, loadout specials tab equips to slot 1/2 with a swap; plus startup, join, data load, client start, challenge → countdown (frozen) → start (ownership) → villain AI runs → one hit per contact → slam refused without a fall / accepted after one → ring-out win with one reward → rematch → forfeit pays nothing → leave restores avatar and camera → Workshop UI equip → settings saved → practice (tutorial advances when you drive) → queue → disconnect mid-battle → reset mid-battle → timeout and auto-close → save on leave → failed DataStore = unsaved temporary profile → shutdown saves → backup on-foot controls → no infinite-yield warnings or script errors |
 | `launch.test.luau` | 7 passed | needle sweep, moving green zone, perfect/good/weak quality, press validation (stale, future, outside the meter), effects on spin/speed/boost, boost fade, villain launch skill |
 | `config.test.luau` | passed | crate odds total 100%, 400k simulated rolls, Ultra = +10%, designs and mesh data for every part |
 | bad crate odds | passed | a crate whose odds total 100.01% refuses to load |
@@ -142,7 +202,7 @@ Actual run, 2026-10-14:
 
 Note the result of each step (✓ / ✗ + a screenshot of anything red in Output).
 
-1. **Install** (Command Bar). Output: `Spinforge installed: 29 scripts.` Press Play.
+1. **Install** (Command Bar). Output: `Spinforge installed: 33 scripts.` Press Play.
 2. **Startup.** Output shows `Spinforge server ready: world built, N of 66 bey meshes available…` with no red text.
    You spawn on the blue pad in the hub. The arena is right beside it; the training bowl is further out (you are teleported to both).
 3. **Walk.** WASD moves your avatar and the camera follows. If you see "Backup controls on", note it: your
@@ -186,6 +246,9 @@ Note the result of each step (✓ / ✗ + a screenshot of anything red in Output
 | Challenge / Practice / Workshop | Hold E at the prompt | Prompt button (X) | Tap the prompt |
 | Rematch / Back to hub | Click | Selected button + A | Tap |
 | Practice reset / leave | R / Q | Y / B | "Back to hub" button |
+| Special 1 / Special 2 (battle) | 1 / 2 | X / Y | Tap the cards |
+| Awaken (battle, meter full) | R | LB | Tap the meter |
+| Camera: bey view / overhead | V | D-pad up | — |
 | Diagnostics | F6 | — | — |
 
 ## Residual exploit exposure (client-owned physics)

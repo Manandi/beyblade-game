@@ -31,7 +31,11 @@ using simple block shapes. To get the real models:
    into **ReplicatedStorage > BeyMeshes** by itself. To keep the edit view tidy, drag it there yourself.
 4. Repeat for `discs.fbx` and `drivers.fbx`, then press **Play**.
 
-Save the place (File > Save) so you don't have to import again. Re-running the installer keeps the BeyMeshes folder.
+**Spirit creatures** (the giant glowing beasts that appear for specials) work the same way: import
+[`assets/meshes/spirits.fbx`](assets/meshes/) and press Play. The game moves the creatures into
+**ReplicatedStorage > SpiritMeshes**. Until then a simple part-built beast stands in.
+
+Save the place (File > Save) so you don't have to import again. Re-running the installer keeps the BeyMeshes and SpiritMeshes folders.
 After the meshes are regenerated (`tools/blender/build_beys.py`), delete the three models in BeyMeshes and import the new files.
 
 ### Controls
@@ -42,6 +46,9 @@ After the meshes are regenerated (`tools/blender/build_beys.py`), delete the thr
 | Launch (during 3-2-1: stop the needle in the green) | Space / click | A / right trigger | LAUNCH |
 | Jump | Space | A | JUMP |
 | Slam (in the air) | Click | Right trigger | SLAM |
+| Special 1 / Special 2 (battle) | 1 / 2 | X / Y | Tap the cards |
+| Awaken (battle, when the meter is full) | R | LB | Tap the meter |
+| Camera: bey view / overhead | V | D-pad up | |
 | Practice: reset / back to hub | R / Q | Y / B | Back to hub |
 | Diagnostics | F6 | | |
 
@@ -51,13 +58,14 @@ Nose up as you leave the stadium lip to launch higher. Every tuning number is in
 ## What is in here
 | Path | What |
 |---|---|
-| `src/shared/Core/` | The rules, as pure tested modules: `MovementCore`, `CombatCore`, `BattleCore`, `Progression`, `PlayerData`, `SessionStore` |
-| `src/shared/` | `BeyConfig` (parts, stats, crate odds, movement tuning), `GameConfig` (combat, battle, villain, progression, saving), designs, visuals, `Net` (remotes) |
+| `src/shared/Core/` | The rules, as pure tested modules: `MovementCore`, `CombatCore`, `BattleCore`, `LaunchCore`, `SpecialsCore`, `Progression`, `PlayerData`, `SessionStore` |
+| `src/shared/` | `BeyConfig` (parts, spirits, specials, stats, crate odds, movement tuning), `GameConfig` (combat, battle, villain, progression, saving), designs, visuals, `Net` (remotes) |
 | `src/server/` | `Main` (startup), `World` (arena, training bowl, hub), `BeyService` (modes), `BattleService`, `VillainAI`, `DataService`, `BeyFactory`, `MeshImport` |
-| `src/client/` | `Main`, `Controller` (bey + camera), `Hud`, `Menus` (Workshop, Settings), `Tutorial`, `Effects`, `OnFootFallback` |
+| `src/client/` | `Main`, `Controller` (bey + camera, overhead toggle), `Hud`, `SpecialsHud`, `Menus` (Loadout, Settings), `Spirits` (creatures), `Effects` (hits, trails), `Sounds`, `Tutorial`, `OnFootFallback` |
 | `tools/run_tests.py` | All tests: unit tests for the rules plus a smoke run of the real scripts in a Roblox mock (`tools/tests/`) |
 | `tools/make_installer.py` | Regenerates the installer from `src/` (the tests check it's up to date) |
 | `tools/blender/build_beys.py`, `assets/` | Blender modelling of all 33 parts (FBX to import, `BeyMeshData.lua`, previews) |
+| `tools/blender/build_spirits.py` | Blender modelling of the 5 spirit creatures (`spirits.fbx`, `SpiritMeshData.lua`, previews) |
 
 ## Ground rules
 - **Original designs only.** No Beyblade part names, designs or wiki data. A licence means a deal with the rights

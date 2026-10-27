@@ -347,7 +347,7 @@ function Controller.start(ctx)
 		-- dash special: burst toward the foe (the server already counted it; this only moves our own bey)
 		if pendingDash then
 			local d = pendingDash.dir
-			vel = Vector3.new(d.X * pendingDash.speed, math.max(vel.Y, 0) + 6, d.Z * pendingDash.speed)
+			vel = Vector3.new(d.X * pendingDash.speed, vel.Y, d.Z * pendingDash.speed)
 			pendingDash = nil
 		end
 

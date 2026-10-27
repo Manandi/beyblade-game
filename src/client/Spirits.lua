@@ -101,11 +101,17 @@ local function buildCreature(id, color)
 	if template and template:IsA("MeshPart") and size then
 		local m = Instance.new("Model")
 		local shell = template:Clone()
+		for _, child in ipairs(shell:GetChildren()) do
+			child:Destroy() -- drop anything the importer attached (SurfaceAppearance, welds)
+		end
+		pcall(function()
+			shell.TextureID = ""
+		end)
 		shell.Size = size
 		shell.CFrame = CFrame.new(0, size.Y / 2, 0) * SPIN_FIX
 		styled(shell, color, Enum.Material.ForceField, 0)
 		shell.Parent = m
-		local core = template:Clone()
+		local core = shell:Clone()
 		core.Size = size * 0.97
 		core.CFrame = shell.CFrame
 		styled(core, color, Enum.Material.Neon, 0.82)

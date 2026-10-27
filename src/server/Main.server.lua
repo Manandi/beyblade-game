@@ -37,6 +37,11 @@ World.removeLegacy()
 local world = World.build(GameConfig.Villain.Name)
 World.polishLighting()
 local meshes, moved = MeshImport.collect()
+local spiritMeshes, spiritsMoved = MeshImport.spirits()
+local spiritCount = 0
+for _ in pairs(BeyConfig.Spirits) do
+	spiritCount += 1
+end
 
 DataService.start(remotes)
 BeyService.start(remotes, DataService, BattleService.onSlam)
@@ -129,9 +134,11 @@ remotes.Request.OnServerEvent:Connect(function(player, req)
 	end
 end)
 
-print(("Spinforge server ready: world %s, %d of %d bey meshes available%s, crates disabled (paid purchases off)."):format(
+print(("Spinforge server ready: world %s, %d of %d bey meshes available%s, %d of %d spirit meshes, crates disabled (paid purchases off)."):format(
 	world.built and "built" or "found (custom SpinforgeWorld)",
 	meshes,
 	66,
-	moved > 0 and (" (moved " .. moved .. " imported model(s) from Workspace)") or ""
+	(moved + spiritsMoved) > 0 and (" (moved " .. (moved + spiritsMoved) .. " imported model(s) from Workspace)") or "",
+	spiritMeshes,
+	spiritCount
 ))
