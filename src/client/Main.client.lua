@@ -30,6 +30,10 @@ local Tutorial = require(script.Parent.Tutorial)
 local Controller = require(script.Parent.Controller)
 local LaunchCore = require(Shared.Core.LaunchCore)
 local GameConfig = require(Shared.GameConfig)
+local BeyConfig = require(Shared.BeyConfig)
+local Spirits = require(script.Parent.Spirits)
+local SpecialsHud = require(script.Parent.SpecialsHud)
+local Sounds = require(script.Parent.Sounds)
 
 local profile = nil
 local function settings()
@@ -40,6 +44,43 @@ local effects = Effects.new(settings)
 local menus = Menus.new(hud, remotes)
 local tutorial = Tutorial.new(hud, remotes)
 Controller.start({ remotes = remotes, hud = hud, effects = effects, tutorial = tutorial })
+
+-- Specials: keys 1 / 2 (gamepad X / Y), Awakening: R (gamepad LB). Also clickable on the HUD cards.
+local function battleActive()
+	return player:GetAttribute("Mode") == "Battle" and player:GetAttribute("BattleState") == "active"
+end
+local function useSpecial(index)
+	if battleActive() then
+		remotes.Request:FireServer({ action = "special", index = index })
+	end
+end
+local function awaken()
+	if battleActive() then
+		remotes.Request:FireServer({ action = "awaken" })
+	end
+end
+local specialsHud = SpecialsHud.new(hud, useSpecial, awaken)
+local spirits = Spirits.new(effects, {
+	cinematic = function(duration, zoom)
+		Controller.cinematic(duration, zoom)
+	end,
+	banner = function(text, color, small)
+		specialsHud:showBanner(text, color, small)
+	end,
+})
+UserInputService.InputBegan:Connect(function(input, processed)
+	if processed or not battleActive() or UserInputService:GetFocusedTextBox() then
+		return
+	end
+	local kc = input.KeyCode
+	if kc == Enum.KeyCode.One or kc == Enum.KeyCode.KeypadOne or kc == Enum.KeyCode.ButtonX then
+		useSpecial(1)
+	elseif kc == Enum.KeyCode.Two or kc == Enum.KeyCode.KeypadTwo or kc == Enum.KeyCode.ButtonY then
+		useSpecial(2)
+	elseif kc == Enum.KeyCode.R or kc == Enum.KeyCode.ButtonL1 then
+		awaken()
+	end
+end)
 require(script.Parent.OnFootFallback).start({ hud = hud, isBound = function()
 	return Controller.isBound()
 end })
@@ -81,6 +122,26 @@ hud.modeBtn.Activated:Connect(function()
 	end
 end)
 
+local beys = Workspace:WaitForChild("Beys", 30)
+effects:trackBeys(beys)
+
+-- The Body of "player" (yours) or "villain".
+local function beyBody(who)
+	if not beys then
+		return nil
+	end
+	if who == "player" then
+		local m = beys:FindFirstChild(tostring(player.UserId))
+		return m and m:FindFirstChild("Body")
+	end
+	for _, m in ipairs(beys:GetChildren()) do
+		if m:GetAttribute("Villain") then
+			return m:FindFirstChild("Body")
+		end
+	end
+	return nil
+end
+
 -- Battle events.
 local inBattle = false
 remotes.BattleEvent.OnClientEvent:Connect(function(e)
@@ -93,14 +154,17 @@ remotes.BattleEvent.OnClientEvent:Connect(function(e)
 		inBattle = true
 		hud:closeBattle()
 		hud:countdown(e.seconds or 3, e.foe, e.difficulty)
+		specialsHud:setLoadout(type(e.loadout) == "table" and e.loadout.specials or nil)
+		specialsHud:show(true)
 		if type(e.meter) == "table" then
 			hud:showLaunch(e.meter)
 		end
 	elseif e.kind == "launchLocked" then
 		-- the server's verdict (normally the same as what we showed)
-		hud:lockLaunch(nil, e.label or "WEAK")
+		hud:lockLaunch(nil, e.label or "WEAK", e.quality)
 	elseif e.kind == "started" then
 		hud:started(e.launch, e.foeLaunch)
+		Sounds.play("Launch", 0.8)
 		if type(e.launch) == "table" then
 			Controller.launch(e.launch.speed, e.launch.boost)
 		end
@@ -113,9 +177,15 @@ remotes.BattleEvent.OnClientEvent:Connect(function(e)
 			hud:popup(("-%d"):format(math.floor(e.dealt + 0.5)), Color3.fromRGB(255, 255, 255), true)
 		end
 		if typeof(e.at) == "Vector3" then
-			effects:sparks(e.at, Color3.fromRGB(255, 230, 150), 6)
+			local crit = e.crit == true or e.foeCrit == true
+			effects:impact(e.at, typeof(e.normal) == "Vector3" and e.normal or nil, e.strength or 0.5, {
+				crit = crit,
+				color = crit and Color3.fromRGB(255, 170, 80) or nil,
+			})
+			if e.crit then
+				specialsHud:showBanner("CRITICAL!", Color3.fromRGB(255, 170, 60), true)
+			end
 		end
-		effects:shake(0.35 * (e.strength or 0.5))
 	elseif e.kind == "slam" then
 		if e.hit then
 			hud:toast((e.dealt and e.dealt > 0) and ("SLAM! -%d"):format(math.floor(e.dealt + 0.5)) or "SLAM!", Color3.fromRGB(255, 200, 120))
@@ -124,7 +194,53 @@ remotes.BattleEvent.OnClientEvent:Connect(function(e)
 		if typeof(e.at) == "Vector3" then
 			effects:slamRing(e.at - Vector3.new(0, 1.8, 0), 1, Color3.fromRGB(255, 80, 80))
 		end
+	elseif e.kind == "special" then
+		local body = beyBody(e.who)
+		local def = BeyConfig.Specials[e.id or ""]
+		local color = def and def.Color or Color3.new(1, 1, 1)
+		spirits:summon({ spirit = e.spirit, body = body, kind = "special", special = e.special, dir = e.dir, id = e.id, big = e.who == "player" })
+		Sounds.play(e.special == "quake" and "Quake" or e.special == "guard" and "Guard" or "Special", 0.8)
+		if e.who == "player" and e.dash then
+			Controller.dash(e.dash, e.dir)
+		end
+		if e.special == "quake" and typeof(e.at) == "Vector3" then
+			effects:burst(e.at - Vector3.new(0, 1.8, 0), color, def and def.Tuning.Radius or 14)
+			effects:shake(0.8)
+		end
+		if (e.healed or 0) > 0.5 then
+			hud:popup(("+%d"):format(math.floor(e.healed + 0.5)), Color3.fromRGB(120, 255, 160), e.who ~= "player")
+		end
+		if e.hit and (e.dealt or 0) > 0.5 then
+			hud:popup(("-%d"):format(math.floor(e.dealt + 0.5)), e.who == "player" and Color3.new(1, 1, 1) or Color3.fromRGB(255, 110, 110), e.who == "player")
+		end
+	elseif e.kind == "awaken" then
+		local def = BeyConfig.Spirits[e.spirit or ""]
+		local color = def and def.Color or Color3.new(1, 1, 1)
+		spirits:summon({
+			spirit = e.spirit,
+			body = beyBody(e.who),
+			kind = "awaken",
+			duration = e.duration,
+			big = e.who == "player",
+			face = function()
+				local other = beyBody(e.who == "player" and "villain" or "player")
+				return other and other.Position or nil
+			end,
+		})
+		specialsHud:wash(color, e.who == "player" and 0.45 or 0.25)
+		effects:shake(e.who == "player" and 1 or 0.6)
+		Sounds.play("Awaken", 1)
+	elseif e.kind == "specials" then
+		specialsHud:update(e.you, e.foe)
+		if type(e.you) == "table" then
+			Controller.setSpeedMultiplier(e.you.speed or 1)
+		end
+	elseif e.kind == "specialRefused" then
+		specialsHud:refused(e.index)
 	elseif e.kind == "finished" then
+		local won = e.outcome == "win"
+		specialsHud:showBanner(won and "WINNER!" or e.outcome == "loss" and "DEFEATED" or "DRAW", won and Color3.fromRGB(255, 220, 90) or Color3.fromRGB(255, 110, 110), false)
+		Sounds.play(won and "Win" or "Lose", 0.9)
 		hud:showResult(e, function()
 			remotes.Request:FireServer({ action = "rematch" })
 		end, function()
@@ -133,6 +249,9 @@ remotes.BattleEvent.OnClientEvent:Connect(function(e)
 	elseif e.kind == "closed" then
 		inBattle = false
 		hud:closeBattle()
+		specialsHud:show(false)
+		spirits:clear()
+		Controller.setSpeedMultiplier(1)
 	elseif e.kind == "openWorkshop" then
 		menus:open()
 	end
@@ -146,8 +265,8 @@ local function pressLaunch()
 	end
 	local t = Workspace:GetServerTimeNow()
 	local pos = LaunchCore.needle(meter, t)
-	local _, label = LaunchCore.quality(meter, pos, GameConfig.Launch)
-	hud:lockLaunch(pos, label)
+	local q, label = LaunchCore.quality(meter, pos, GameConfig.Launch)
+	hud:lockLaunch(pos, label, q)
 	remotes.Request:FireServer({ action = "launch", t = t })
 end
 UserInputService.InputBegan:Connect(function(input, processed)
@@ -168,7 +287,6 @@ RunService.RenderStepped:Connect(function()
 end)
 
 -- Live battle bars from the beys' Spin attributes (set by the server).
-local beys = Workspace:WaitForChild("Beys", 30)
 RunService.RenderStepped:Connect(function()
 	if not inBattle or not beys then
 		return

@@ -898,4 +898,4 @@ end
 
 return SpecialsCore
 ]=====])
-print('Spinforge installer part 3 of 8 done. Now run part 4.')
+print('Spinforge installer part 3 of 9 done. Now run part 4.')

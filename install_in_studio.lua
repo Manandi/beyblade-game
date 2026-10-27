@@ -3073,6 +3073,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared = ReplicatedStorage:WaitForChild("Spinforge")
 local BeyConfig = require(Shared.BeyConfig)
 local BeyVisuals = require(Shared.BeyVisuals)
+local BeyDesigns = require(Shared.BeyDesigns)
 local GameConfig = require(Shared.GameConfig)
 local CombatCore = require(Shared.Core.CombatCore)
 
@@ -3087,6 +3088,10 @@ function BeyFactory.build(opts)
 	local model = Instance.new("Model")
 	model.Name = opts.name
 	model.Parent = opts.parent -- parented first so the welds capture the layout
+	local design = BeyDesigns.Parts[opts.partIds.Layer]
+	if design then
+		model:SetAttribute("Accent", design.Accent) -- trail and glow colour (client effects)
+	end
 
 	local body = Instance.new("Part")
 	body.Name = "Body"
@@ -4480,6 +4485,8 @@ install('SPS', '', 'ModuleScript', 'Controller', [=====[
 --   tilt      mouse / right stick / drag on the right half of the screen   (down = lean in, up = brake)
 --   jump      Space / gamepad A / JUMP button          slam   click / right trigger / SLAM button (in the air)
 --   practice  R or gamepad Y = reset bey, Q or gamepad B = back to the hub
+--   camera    V or gamepad D-pad up = switch between the bey camera and the overhead stadium view
+--             (overhead: W is always "up the screen", the mouse only tilts)
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -4495,6 +4502,8 @@ local LaunchCore = require(Shared.Core.LaunchCore)
 
 local M = BeyConfig.Movement
 local MAX_TILT = math.rad(M.MaxTiltDeg)
+local BASE_FOV = 70
+local OVERHEAD = { Height = 58, Back = 34, Follow = 0.35, Blend = 6 } -- overhead view: how high, how far back, how much it follows your bey
 
 local Controller = {}
 
@@ -4516,10 +4525,18 @@ function Controller.start(ctx)
 	local jumpQueued, slamQueued = false, false
 	local pendingKnockback = Vector3.zero
 	local pendingLaunch = nil -- { speed, boost } from the server's "started" event
+	local pendingDash = nil -- { speed, dir } from a dash special
 	local launchBoost, launchAt = 0, -math.huge
 	local focus
 	local movedFor, fastAt = 0, -math.huge
 	local flipsAt, flipsRate, lastFlips = os.clock(), 0, 0
+	local camMode = player:GetAttribute("CameraMode") == "Overhead" and "Overhead" or "Bey"
+	local overheadYaw = 0
+	local overheadBlend = camMode == "Overhead" and 1 or 0
+	local speedMul = 1 -- spirit passive / awakening, from the server's snapshots
+	local cine = { untilT = 0, zoom = 1, len = 1 } -- short zoom-in when you use a special
+	local zoomNow = 1
+	local lastCam
 
 	local rayParams = RaycastParams.new()
 	rayParams.FilterType = Enum.RaycastFilterType.Exclude
@@ -4657,6 +4674,13 @@ function Controller.start(ctx)
 			slamQueued = true
 		elseif kc == Enum.KeyCode.Space or kc == Enum.KeyCode.ButtonA then
 			jumpQueued = true
+		elseif kc == Enum.KeyCode.V or kc == Enum.KeyCode.DPadUp then
+			camMode = camMode == "Overhead" and "Bey" or "Overhead"
+			player:SetAttribute("CameraMode", camMode)
+			if camMode == "Overhead" then
+				overheadYaw = yaw
+			end
+			hud:toast(camMode == "Overhead" and "Overhead view  (V to switch back)" or "Bey view  (V for overhead)")
 		elseif (kc == Enum.KeyCode.R or kc == Enum.KeyCode.ButtonY) and mode() == "Practice" then
 			resetBey()
 		elseif (kc == Enum.KeyCode.Q or kc == Enum.KeyCode.ButtonB) and mode() == "Practice" then
@@ -4688,6 +4712,7 @@ function Controller.start(ctx)
 		tutorial:setActive(false)
 		-- Always give the normal camera and mouse back.
 		camera.CameraType = Enum.CameraType.Custom
+		camera.FieldOfView = BASE_FOV
 		local hum = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
 		if hum then
 			camera.CameraSubject = hum
@@ -4708,9 +4733,11 @@ function Controller.start(ctx)
 		clearInputs()
 		pendingKnockback = Vector3.zero
 		pendingLaunch, launchBoost, launchAt = nil, 0, -math.huge
+		speedMul, pendingDash = 1, nil
 		local look = body.CFrame.LookVector
 		yaw = math.atan2(-look.X, -look.Z)
 		noseYaw, pitch, up, focus = yaw, 0, Vector3.yAxis, nil
+		overheadYaw = yaw
 		camera.CameraSubject = body
 		hud:showTouchButtons(true)
 		tutorial:setActive(true)
@@ -4782,7 +4809,7 @@ function Controller.start(ctx)
 		if wish.Magnitude > 1 then
 			wish = wish.Unit
 		end
-		local speed = MC.topSpeed(stats(), M) * LaunchCore.boostMultiplier(launchBoost, now - launchAt, GameConfig.Launch)
+		local speed = MC.topSpeed(stats(), M) * LaunchCore.boostMultiplier(launchBoost, now - launchAt, GameConfig.Launch) * speedMul
 
 		-- LET IT RIP: shoot off the line where the camera is aiming.
 		if pendingLaunch then
@@ -4791,6 +4818,13 @@ function Controller.start(ctx)
 			vel = Vector3.new(aim.X * pendingLaunch.speed, vel.Y, aim.Z * pendingLaunch.speed)
 			launchBoost, launchAt = pendingLaunch.boost, now
 			pendingLaunch = nil
+		end
+
+		-- dash special: burst toward the foe (the server already counted it; this only moves our own bey)
+		if pendingDash then
+			local d = pendingDash.dir
+			vel = Vector3.new(d.X * pendingDash.speed, math.max(vel.Y, 0) + 6, d.Z * pendingDash.speed)
+			pendingDash = nil
 		end
 
 		-- ground probe: a sphere cast (wider than a ray, so slab seams don't drop us), ray as fallback
@@ -4902,18 +4936,50 @@ function Controller.start(ctx)
 			UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter
 			UserInputService.MouseIconEnabled = false
 			local delta = UserInputService:GetMouseDelta()
-			yaw -= delta.X * M.MouseSensitivity
+			if camMode ~= "Overhead" then
+				yaw -= delta.X * M.MouseSensitivity
+			end
 			pitch = math.clamp(pitch - delta.Y * M.MouseSensitivity, -MAX_TILT, MAX_TILT)
 		end
+		if camMode == "Overhead" then
+			yaw = overheadYaw -- W = up the screen
+		end
+		-- impact freeze: hold the camera for a moment on a hit
+		if lastCam and effects:frozen() then
+			camera.CFrame = lastCam * effects:shakeOffset(dt)
+			return
+		end
+		local now = os.clock()
+		local zoomWanted = 1
+		if now < cine.untilT then
+			local t = 1 - (cine.untilT - now) / cine.len
+			zoomWanted = t < 0.7 and cine.zoom or 1
+		end
+		zoomNow += (zoomWanted - zoomNow) * (1 - math.exp(-(zoomWanted < zoomNow and 14 or 5) * dt))
+		overheadBlend += ((camMode == "Overhead" and 1 or 0) - overheadBlend) * (1 - math.exp(-OVERHEAD.Blend * dt))
+
 		local target = body.Position + Vector3.new(0, M.CameraHeight, 0)
 		focus = focus and focus:Lerp(target, 1 - math.exp(-22 * dt)) or target
 		local camPitch = math.clamp(M.CameraBasePitch - pitch * 0.8, M.CameraMinPitch, 1.1)
-		local wanted = (CFrame.new(focus) * CFrame.Angles(0, yaw, 0) * CFrame.Angles(-camPitch, 0, 0) * CFrame.new(0, 0, M.CameraDistance)).Position
-		local hit = Workspace:Raycast(focus, wanted - focus, cameraParams)
+		local beyEye = (CFrame.new(focus) * CFrame.Angles(0, yaw, 0) * CFrame.Angles(-camPitch, 0, 0) * CFrame.new(0, 0, M.CameraDistance * zoomNow)).Position
+		local hit = Workspace:Raycast(focus, beyEye - focus, cameraParams)
 		if hit then
-			wanted = hit.Position + (focus - hit.Position).Unit * 0.8
+			beyEye = hit.Position + (focus - hit.Position).Unit * 0.8
 		end
-		camera.CFrame = CFrame.lookAt(wanted, focus) * effects:shakeOffset(dt)
+		local eye, look = beyEye, focus
+		if overheadBlend > 0.001 then
+			local center = player:GetAttribute("ArenaCenter")
+			center = typeof(center) == "Vector3" and center or body.Position
+			local follow = OVERHEAD.Follow + (1 - zoomNow) * 1.4 -- a special pulls the view onto your bey
+			local lookAt = center:Lerp(body.Position, math.clamp(follow, 0, 1))
+			local flatBack = CFrame.Angles(0, overheadYaw, 0).LookVector * -1
+			local topEye = lookAt + Vector3.new(0, OVERHEAD.Height * zoomNow, 0) + flatBack * OVERHEAD.Back * zoomNow
+			eye = beyEye:Lerp(topEye, overheadBlend)
+			look = focus:Lerp(lookAt, overheadBlend)
+		end
+		lastCam = CFrame.lookAt(eye, look)
+		camera.FieldOfView = BASE_FOV + effects:fovOffset(dt)
+		camera.CFrame = lastCam * effects:shakeOffset(dt)
 	end)
 
 	-- Called by Main when the battle starts. Applied on the first unfrozen frame.
@@ -4925,6 +4991,34 @@ function Controller.start(ctx)
 
 	function Controller.isBound()
 		return body ~= nil and body.Parent ~= nil
+	end
+
+	-- A dash special was used: burst toward dir at speed on the next physics step.
+	function Controller.dash(speed, dir)
+		if body and MC.finite(speed) and typeof(dir) == "Vector3" and MC.finiteVector(dir) then
+			local flat = Vector3.new(dir.X, 0, dir.Z)
+			if flat.Magnitude > 0.01 then
+				pendingDash = { speed = math.clamp(speed, 0, 150), dir = flat.Unit }
+			end
+		end
+	end
+
+	-- Top-speed multiplier from the spirit passive / awakening (sent by the server).
+	function Controller.setSpeedMultiplier(m)
+		if MC.finite(m) then
+			speedMul = math.clamp(m, 0.5, 1.5)
+		end
+	end
+
+	-- Short zoom onto your bey (your special / awakening). zoom < 1 = closer.
+	function Controller.cinematic(duration, zoom)
+		cine.len = math.max(duration or 1, 0.1)
+		cine.untilT = os.clock() + cine.len
+		cine.zoom = math.clamp(zoom or 0.7, 0.3, 1)
+	end
+
+	function Controller.cameraMode()
+		return camMode
 	end
 
 	-- diagnostics (F6) ------------------------------------------------------------------------------------------
@@ -4960,25 +5054,56 @@ function Controller.isBound()
 end
 
 function Controller.launch() end
+function Controller.dash() end
+function Controller.setSpeedMultiplier() end
+function Controller.cinematic() end
+function Controller.cameraMode()
+	return "Bey"
+end
 
 return Controller
 ]=====])
 install('SPS', '', 'ModuleScript', 'Effects', [=====[
 --!nonstrict
 -- Effects: client-only visual feedback with hard caps (pooled parts, never more than MAX_* alive at once).
---   slamRing(pos, scale)    expanding ring where a slam lands
---   sparks(pos, color, n)   short burst for hits
---   shake(amount)           camera shake impulse (off when the player disables it)
--- Reduced effects (setting) skips sparks and shrinks rings; camera shake has its own setting.
+--   impact(pos, normal, strength, opts)  a bey-on-bey hit: white flash, light burst, floor shockwave, streak sparks,
+--                                        chips, camera shake, a short impact freeze (hitstop) and an FOV kick.
+--                                        opts = { crit = bool (empowered hit: everything bigger), color = Color3 }
+--   slamRing(pos, scale, color)          expanding ring where a slam lands
+--   sparks(pos, color, n)                small chips flying out
+--   burst(pos, color, radius)            a big coloured shockwave + light (specials, quakes)
+--   trackBeys(folder)                    gives every bey a motion trail and a soft glow on the floor
+--   shake(amount)                        camera shake impulse (off when the player disables it)
+--   shakeOffset(dt), fovOffset(dt), frozen()   read by the camera every frame
+-- Reduced effects (setting) skips sparks/particles and shrinks rings; camera shake has its own setting.
+-- Unverified in Roblox: how strong all of this looks and feels. Tune the numbers in TUNE.
 
+local Debris = game:GetService("Debris")
 local TweenService = game:GetService("TweenService")
 local Workspace = game:GetService("Workspace")
+
+local Sounds = require(script.Parent.Sounds)
 
 local Effects = {}
 Effects.__index = Effects
 
-local MAX_RINGS = 6
-local MAX_SPARKS = 24
+local MAX_RINGS = 8
+local MAX_SPARKS = 32
+local MAX_FLASHES = 6
+local SPARK_TEXTURE = "rbxasset://textures/particles/sparkles_main.dds" -- ships with every Roblox client
+
+local TUNE = {
+	FlashSize = 5, -- white flash ball diameter at strength 1 (x1.6 on a crit)
+	ShockRadius = 12, -- floor ring radius at strength 1
+	LightBrightness = 7,
+	LightRange = 22,
+	StreakCount = 18, -- streak sparks per hit at strength 1
+	Hitstop = 0.035, -- seconds the camera holds on a hit (+ more for strength and crits)
+	HitstopCrit = 0.09,
+	FovKick = 7, -- degrees at strength 1
+	TrailLife = 0.22,
+}
+Effects.TUNE = TUNE
 
 function Effects.new(getSettings)
 	local self = setmetatable({}, Effects)
@@ -4986,9 +5111,41 @@ function Effects.new(getSettings)
 	self.folder = Instance.new("Folder")
 	self.folder.Name = "SpinforgeEffects"
 	self.folder.Parent = Workspace
-	self.rings, self.sparkParts = {}, {}
+	self.rings, self.sparkParts, self.flashes = {}, {}, {}
 	self.active = 0
 	self.shakeAmount = 0
+	self.fov = 0
+	self.freezeUntil = 0
+
+	-- one emitter for every streak spark (Emit() bursts are cheap; the part moves to each hit)
+	local host = Instance.new("Part")
+	host.Name = "SparkHost"
+	host.Anchored = true
+	host.CanCollide = false
+	host.CanQuery = false
+	host.CanTouch = false
+	host.Transparency = 1
+	host.Size = Vector3.new(0.2, 0.2, 0.2)
+	host.Parent = self.folder
+	local att = Instance.new("Attachment")
+	att.Parent = host
+	local pe = Instance.new("ParticleEmitter")
+	pe.Name = "Streaks"
+	pe.Enabled = false
+	pe.Texture = SPARK_TEXTURE
+	pe.LightEmission = 1
+	pe.LightInfluence = 0
+	pe.Orientation = Enum.ParticleOrientation.VelocityParallel
+	pe.Squash = NumberSequence.new(2.2) -- long thin streaks along their flight
+	pe.Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.45), NumberSequenceKeypoint.new(1, 0) })
+	pe.Lifetime = NumberRange.new(0.12, 0.32)
+	pe.Speed = NumberRange.new(40, 95)
+	pe.SpreadAngle = Vector2.new(180, 180)
+	pe.Acceleration = Vector3.new(0, -70, 0)
+	pe.Drag = 3
+	pe.Parent = att
+	self.streaks = pe
+	self.sparkHost = host
 	return self
 end
 
@@ -5024,9 +5181,9 @@ local function take(pool, max, folder, shape)
 	return nil
 end
 
-function Effects:_play(p, goal, time)
+function Effects:_play(p, goal, time, style)
 	self.active += 1
-	local tween = TweenService:Create(p, TweenInfo.new(time, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), goal)
+	local tween = TweenService:Create(p, TweenInfo.new(time, style or Enum.EasingStyle.Quad, Enum.EasingDirection.Out), goal)
 	tween.Completed:Connect(function()
 		p.Transparency = 1
 		p:SetAttribute("Busy", false)
@@ -5035,18 +5192,100 @@ function Effects:_play(p, goal, time)
 	tween:Play()
 end
 
-function Effects:slamRing(pos, scale, color)
-	local s = self.getSettings()
+-- A flat ring on the floor at pos, growing to `radius`.
+function Effects:_ring(pos, radius, color, time, startTransparency)
 	local p = take(self.rings, MAX_RINGS, self.folder, Enum.PartType.Cylinder)
 	if not p then
 		return
 	end
-	local r = (s.ReducedEffects and 10 or 18) * math.clamp(scale or 1, 0.3, 1.5)
-	p.Color = color or Color3.fromRGB(255, 120, 60)
-	p.Size = Vector3.new(0.4, 2, 2)
+	p.Color = color
+	p.Size = Vector3.new(0.3, 2, 2)
 	p.CFrame = CFrame.new(pos) * CFrame.Angles(0, 0, math.rad(90))
-	p.Transparency = 0.2
-	self:_play(p, { Size = Vector3.new(0.4, r * 2, r * 2), Transparency = 1 }, 0.35)
+	p.Transparency = startTransparency or 0.15
+	self:_play(p, { Size = Vector3.new(0.3, radius * 2, radius * 2), Transparency = 1 }, time)
+end
+
+local function light(parent, color, brightness, range, time)
+	local l = Instance.new("PointLight")
+	l.Color = color
+	l.Brightness = brightness
+	l.Range = range
+	l.Shadows = false
+	l.Parent = parent
+	TweenService:Create(l, TweenInfo.new(time, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Brightness = 0 }):Play()
+	Debris:AddItem(l, time + 0.05)
+end
+
+-- Bey-on-bey hit. strength 0..1 (closing speed), normal = direction of the hit (A -> B).
+function Effects:impact(pos, normal, strength, opts)
+	opts = opts or {}
+	local s = self.getSettings()
+	strength = math.clamp(strength or 0.5, 0.15, 1)
+	local crit = opts.crit == true
+	local big = crit and 1.6 or 1
+	local color = opts.color or Color3.fromRGB(255, 220, 140)
+
+	-- white-hot flash ball
+	local f = take(self.flashes, MAX_FLASHES, self.folder, Enum.PartType.Ball)
+	if f then
+		f.Color = Color3.new(1, 1, 1)
+		f.Size = Vector3.new(1, 1, 1)
+		f.CFrame = CFrame.new(pos)
+		f.Transparency = 0
+		local d = TUNE.FlashSize * (0.5 + strength) * big
+		self:_play(f, { Size = Vector3.new(d, d, d), Transparency = 1 }, crit and 0.2 or 0.13)
+		light(f, color, TUNE.LightBrightness * strength * big, TUNE.LightRange * big, crit and 0.35 or 0.22)
+	end
+	-- shockwave on the floor (the bowl is ~1.6 below the bey centre)
+	local floor = pos - Vector3.new(0, 1.7, 0)
+	local radius = TUNE.ShockRadius * (0.4 + 0.6 * strength) * big * (s.ReducedEffects and 0.6 or 1)
+	self:_ring(floor, radius, color, crit and 0.4 or 0.28, 0.1)
+	if crit then
+		self:_ring(floor, radius * 1.6, Color3.new(1, 1, 1), 0.55, 0.4)
+	end
+	-- streak sparks + chips
+	if not s.ReducedEffects then
+		self.sparkHost.CFrame = CFrame.new(pos)
+		self.streaks.Color = ColorSequence.new(Color3.new(1, 1, 1), color)
+		self.streaks:Emit(math.floor(TUNE.StreakCount * (0.4 + 0.6 * strength) * big))
+		self:sparks(pos, color, crit and 8 or 4)
+	end
+	-- camera: shake, freeze, FOV kick
+	self:shake((0.35 + 0.45 * strength) * big)
+	if s.CameraShake then
+		local hold = TUNE.Hitstop * (0.5 + strength) + (crit and TUNE.HitstopCrit or 0)
+		self.freezeUntil = math.max(self.freezeUntil, os.clock() + hold)
+		self.fov = math.max(self.fov, TUNE.FovKick * strength * big)
+	end
+	Sounds.play(crit and "HitHeavy" or "Hit", 0.5 + 0.5 * strength, 0.9 + math.random() * 0.25)
+end
+
+function Effects:slamRing(pos, scale, color)
+	local s = self.getSettings()
+	local r = (s.ReducedEffects and 10 or 18) * math.clamp(scale or 1, 0.3, 1.5)
+	self:_ring(pos, r, color or Color3.fromRGB(255, 120, 60), 0.35, 0.2)
+end
+
+-- Big coloured burst: specials, quakes, awakenings.
+function Effects:burst(pos, color, radius)
+	local s = self.getSettings()
+	radius = radius or 16
+	self:_ring(pos, radius, color, 0.45, 0.05)
+	self:_ring(pos, radius * 0.6, Color3.new(1, 1, 1), 0.3, 0.3)
+	local f = take(self.flashes, MAX_FLASHES, self.folder, Enum.PartType.Ball)
+	if f then
+		f.Color = color
+		f.Size = Vector3.new(2, 2, 2)
+		f.CFrame = CFrame.new(pos + Vector3.new(0, 1.5, 0))
+		f.Transparency = 0.2
+		self:_play(f, { Size = Vector3.new(radius, radius * 0.6, radius), Transparency = 1 }, 0.4)
+		light(f, color, 6, radius * 2.2, 0.6)
+	end
+	if not s.ReducedEffects then
+		self.sparkHost.CFrame = CFrame.new(pos + Vector3.new(0, 1, 0))
+		self.streaks.Color = ColorSequence.new(Color3.new(1, 1, 1), color)
+		self.streaks:Emit(24)
+	end
 end
 
 function Effects:sparks(pos, color, n)
@@ -5054,7 +5293,7 @@ function Effects:sparks(pos, color, n)
 	if s.ReducedEffects then
 		return
 	end
-	for _ = 1, math.min(n or 6, 8) do
+	for _ = 1, math.min(n or 6, 10) do
 		local p = take(self.sparkParts, MAX_SPARKS, self.folder, Enum.PartType.Ball)
 		if not p then
 			return
@@ -5065,13 +5304,68 @@ function Effects:sparks(pos, color, n)
 		p.Transparency = 0
 		local dir = Vector3.new(math.random() - 0.5, math.random() * 0.8, math.random() - 0.5)
 		dir = dir.Magnitude > 0.01 and dir.Unit or Vector3.yAxis
-		self:_play(p, { CFrame = CFrame.new(pos + dir * (3 + math.random() * 3)), Size = Vector3.new(0.1, 0.1, 0.1), Transparency = 1 }, 0.3)
+		self:_play(p, { CFrame = CFrame.new(pos + dir * (3 + math.random() * 4)), Size = Vector3.new(0.1, 0.1, 0.1), Transparency = 1 }, 0.35)
 	end
 end
 
+-------------------------------------------------------------------------------- trails and glow on every bey
+
+local function addTrail(model)
+	local body = model:WaitForChild("Body", 5)
+	if not body or body:FindFirstChild("SpinTrail") then
+		return
+	end
+	local accent = model:GetAttribute("Accent")
+	if typeof(accent) ~= "Color3" then
+		accent = model:GetAttribute("Villain") and Color3.fromRGB(255, 90, 90) or Color3.fromRGB(120, 220, 255)
+	end
+	local a0 = Instance.new("Attachment")
+	a0.Name = "TrailTop"
+	a0.Position = Vector3.new(0, 0.1, 0)
+	a0.Parent = body
+	local a1 = Instance.new("Attachment")
+	a1.Name = "TrailBottom"
+	a1.Position = Vector3.new(0, -1.3, 0)
+	a1.Parent = body
+	local t = Instance.new("Trail")
+	t.Name = "SpinTrail"
+	t.Attachment0 = a0
+	t.Attachment1 = a1
+	t.FaceCamera = true -- reads from the bey camera and from overhead
+	t.Lifetime = TUNE.TrailLife
+	t.MinLength = 0.2
+	t.LightEmission = 1
+	t.LightInfluence = 0
+	t.Color = ColorSequence.new(Color3.new(1, 1, 1), accent)
+	t.Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.15), NumberSequenceKeypoint.new(1, 1) })
+	t.WidthScale = NumberSequence.new({ NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(1, 0.1) })
+	t.Parent = body
+	local glow = Instance.new("PointLight")
+	glow.Name = "FloorGlow"
+	glow.Color = accent
+	glow.Brightness = 1.4
+	glow.Range = 9
+	glow.Shadows = false
+	glow.Parent = body
+end
+
+function Effects:trackBeys(folder)
+	if not folder then
+		return
+	end
+	folder.ChildAdded:Connect(function(m)
+		task.spawn(addTrail, m)
+	end)
+	for _, m in ipairs(folder:GetChildren()) do
+		task.spawn(addTrail, m)
+	end
+end
+
+-------------------------------------------------------------------------------- camera feedback
+
 function Effects:shake(amount)
 	if self.getSettings().CameraShake then
-		self.shakeAmount = math.min(self.shakeAmount + amount, 1.2)
+		self.shakeAmount = math.min(self.shakeAmount + amount, 1.4)
 	end
 end
 
@@ -5084,6 +5378,17 @@ function Effects:shakeOffset(dt)
 	local a = self.shakeAmount
 	self.shakeAmount = math.max(0, a - dt * 3)
 	return CFrame.new((math.random() - 0.5) * a, (math.random() - 0.5) * a, 0) * CFrame.Angles(0, 0, (math.random() - 0.5) * a * 0.03)
+end
+
+-- Extra field of view this frame (a quick kick on hits that settles back).
+function Effects:fovOffset(dt)
+	self.fov = math.max(0, self.fov - dt * 40)
+	return self.fov
+end
+
+-- True during the short impact freeze after a hit (the camera holds still for a moment).
+function Effects:frozen()
+	return os.clock() < self.freezeUntil
 end
 
 function Effects:count()
@@ -5193,7 +5498,7 @@ function Hud.new(player)
 	self.slamFrame = sl
 	self.lowSpin = Ui.label(gui, {
 		AnchorPoint = Vector2.new(0.5, 1),
-		Position = UDim2.new(0.5, 0, 1, -58),
+		Position = UDim2.new(0.5, 0, 1, -158),
 		Size = UDim2.fromOffset(300, 26),
 		TextXAlignment = Enum.TextXAlignment.Center,
 		Font = Enum.Font.GothamBlack,
@@ -5224,7 +5529,7 @@ function Hud.new(player)
 	self.resultFrame = rp
 
 	-- launch meter (during the countdown): a needle sweeps across; lock it in the green zone
-	local lm = Ui.panel(gui, { Name = "Launch", AnchorPoint = Vector2.new(0.5, 1), Position = UDim2.new(0.5, 0, 1, -70), Size = UDim2.fromOffset(460, 92), Visible = false, ZIndex = 8 })
+	local lm = Ui.panel(gui, { Name = "Launch", AnchorPoint = Vector2.new(0.5, 1), Position = UDim2.new(0.5, 0, 1, -160), Size = UDim2.fromOffset(460, 92), Visible = false, ZIndex = 8 })
 	Ui.pad(lm, 10)
 	self.launchTitle = Ui.label(lm, { Size = UDim2.new(1, 0, 0, 20), Font = Enum.Font.GothamBlack, TextSize = 18, TextXAlignment = Enum.TextXAlignment.Center, Text = "LAUNCH: stop the needle in the GREEN", ZIndex = 9 })
 	local track = Ui.make("Frame", { Position = UDim2.fromOffset(0, 28), Size = UDim2.new(1, 0, 0, 22), BackgroundColor3 = Color3.fromRGB(70, 30, 30), BorderSizePixel = 0, ZIndex = 9 }, lm)
@@ -5381,12 +5686,12 @@ function Hud:setNeedle(pos)
 	end
 end
 
-function Hud:lockLaunch(pos, label)
+function Hud:lockLaunch(pos, label, quality)
 	self.launchLocked = true
 	if pos then
 		self.launchNeedle.Position = UDim2.fromScale(math.clamp(pos, 0, 1), 0.5)
 	end
-	self.launchTitle.Text = label .. "!"
+	self.launchTitle.Text = label .. "!" .. (type(quality) == "number" and ("  %d%%"):format(math.floor(math.clamp(quality, 0, 1) * 100 + 0.5)) or "")
 	self.launchTitle.TextColor3 = LAUNCH_COLOR[label] or C.text
 	self.touchLaunch.Visible = false
 end
@@ -5634,6 +5939,10 @@ local Tutorial = require(script.Parent.Tutorial)
 local Controller = require(script.Parent.Controller)
 local LaunchCore = require(Shared.Core.LaunchCore)
 local GameConfig = require(Shared.GameConfig)
+local BeyConfig = require(Shared.BeyConfig)
+local Spirits = require(script.Parent.Spirits)
+local SpecialsHud = require(script.Parent.SpecialsHud)
+local Sounds = require(script.Parent.Sounds)
 
 local profile = nil
 local function settings()
@@ -5644,6 +5953,43 @@ local effects = Effects.new(settings)
 local menus = Menus.new(hud, remotes)
 local tutorial = Tutorial.new(hud, remotes)
 Controller.start({ remotes = remotes, hud = hud, effects = effects, tutorial = tutorial })
+
+-- Specials: keys 1 / 2 (gamepad X / Y), Awakening: R (gamepad LB). Also clickable on the HUD cards.
+local function battleActive()
+	return player:GetAttribute("Mode") == "Battle" and player:GetAttribute("BattleState") == "active"
+end
+local function useSpecial(index)
+	if battleActive() then
+		remotes.Request:FireServer({ action = "special", index = index })
+	end
+end
+local function awaken()
+	if battleActive() then
+		remotes.Request:FireServer({ action = "awaken" })
+	end
+end
+local specialsHud = SpecialsHud.new(hud, useSpecial, awaken)
+local spirits = Spirits.new(effects, {
+	cinematic = function(duration, zoom)
+		Controller.cinematic(duration, zoom)
+	end,
+	banner = function(text, color, small)
+		specialsHud:showBanner(text, color, small)
+	end,
+})
+UserInputService.InputBegan:Connect(function(input, processed)
+	if processed or not battleActive() or UserInputService:GetFocusedTextBox() then
+		return
+	end
+	local kc = input.KeyCode
+	if kc == Enum.KeyCode.One or kc == Enum.KeyCode.KeypadOne or kc == Enum.KeyCode.ButtonX then
+		useSpecial(1)
+	elseif kc == Enum.KeyCode.Two or kc == Enum.KeyCode.KeypadTwo or kc == Enum.KeyCode.ButtonY then
+		useSpecial(2)
+	elseif kc == Enum.KeyCode.R or kc == Enum.KeyCode.ButtonL1 then
+		awaken()
+	end
+end)
 require(script.Parent.OnFootFallback).start({ hud = hud, isBound = function()
 	return Controller.isBound()
 end })
@@ -5685,6 +6031,26 @@ hud.modeBtn.Activated:Connect(function()
 	end
 end)
 
+local beys = Workspace:WaitForChild("Beys", 30)
+effects:trackBeys(beys)
+
+-- The Body of "player" (yours) or "villain".
+local function beyBody(who)
+	if not beys then
+		return nil
+	end
+	if who == "player" then
+		local m = beys:FindFirstChild(tostring(player.UserId))
+		return m and m:FindFirstChild("Body")
+	end
+	for _, m in ipairs(beys:GetChildren()) do
+		if m:GetAttribute("Villain") then
+			return m:FindFirstChild("Body")
+		end
+	end
+	return nil
+end
+
 -- Battle events.
 local inBattle = false
 remotes.BattleEvent.OnClientEvent:Connect(function(e)
@@ -5697,14 +6063,17 @@ remotes.BattleEvent.OnClientEvent:Connect(function(e)
 		inBattle = true
 		hud:closeBattle()
 		hud:countdown(e.seconds or 3, e.foe, e.difficulty)
+		specialsHud:setLoadout(type(e.loadout) == "table" and e.loadout.specials or nil)
+		specialsHud:show(true)
 		if type(e.meter) == "table" then
 			hud:showLaunch(e.meter)
 		end
 	elseif e.kind == "launchLocked" then
 		-- the server's verdict (normally the same as what we showed)
-		hud:lockLaunch(nil, e.label or "WEAK")
+		hud:lockLaunch(nil, e.label or "WEAK", e.quality)
 	elseif e.kind == "started" then
 		hud:started(e.launch, e.foeLaunch)
+		Sounds.play("Launch", 0.8)
 		if type(e.launch) == "table" then
 			Controller.launch(e.launch.speed, e.launch.boost)
 		end
@@ -5717,9 +6086,15 @@ remotes.BattleEvent.OnClientEvent:Connect(function(e)
 			hud:popup(("-%d"):format(math.floor(e.dealt + 0.5)), Color3.fromRGB(255, 255, 255), true)
 		end
 		if typeof(e.at) == "Vector3" then
-			effects:sparks(e.at, Color3.fromRGB(255, 230, 150), 6)
+			local crit = e.crit == true or e.foeCrit == true
+			effects:impact(e.at, typeof(e.normal) == "Vector3" and e.normal or nil, e.strength or 0.5, {
+				crit = crit,
+				color = crit and Color3.fromRGB(255, 170, 80) or nil,
+			})
+			if e.crit then
+				specialsHud:showBanner("CRITICAL!", Color3.fromRGB(255, 170, 60), true)
+			end
 		end
-		effects:shake(0.35 * (e.strength or 0.5))
 	elseif e.kind == "slam" then
 		if e.hit then
 			hud:toast((e.dealt and e.dealt > 0) and ("SLAM! -%d"):format(math.floor(e.dealt + 0.5)) or "SLAM!", Color3.fromRGB(255, 200, 120))
@@ -5728,7 +6103,53 @@ remotes.BattleEvent.OnClientEvent:Connect(function(e)
 		if typeof(e.at) == "Vector3" then
 			effects:slamRing(e.at - Vector3.new(0, 1.8, 0), 1, Color3.fromRGB(255, 80, 80))
 		end
+	elseif e.kind == "special" then
+		local body = beyBody(e.who)
+		local def = BeyConfig.Specials[e.id or ""]
+		local color = def and def.Color or Color3.new(1, 1, 1)
+		spirits:summon({ spirit = e.spirit, body = body, kind = "special", special = e.special, dir = e.dir, id = e.id, big = e.who == "player" })
+		Sounds.play(e.special == "quake" and "Quake" or e.special == "guard" and "Guard" or "Special", 0.8)
+		if e.who == "player" and e.dash then
+			Controller.dash(e.dash, e.dir)
+		end
+		if e.special == "quake" and typeof(e.at) == "Vector3" then
+			effects:burst(e.at - Vector3.new(0, 1.8, 0), color, def and def.Tuning.Radius or 14)
+			effects:shake(0.8)
+		end
+		if (e.healed or 0) > 0.5 then
+			hud:popup(("+%d"):format(math.floor(e.healed + 0.5)), Color3.fromRGB(120, 255, 160), e.who ~= "player")
+		end
+		if e.hit and (e.dealt or 0) > 0.5 then
+			hud:popup(("-%d"):format(math.floor(e.dealt + 0.5)), e.who == "player" and Color3.new(1, 1, 1) or Color3.fromRGB(255, 110, 110), e.who == "player")
+		end
+	elseif e.kind == "awaken" then
+		local def = BeyConfig.Spirits[e.spirit or ""]
+		local color = def and def.Color or Color3.new(1, 1, 1)
+		spirits:summon({
+			spirit = e.spirit,
+			body = beyBody(e.who),
+			kind = "awaken",
+			duration = e.duration,
+			big = e.who == "player",
+			face = function()
+				local other = beyBody(e.who == "player" and "villain" or "player")
+				return other and other.Position or nil
+			end,
+		})
+		specialsHud:wash(color, e.who == "player" and 0.45 or 0.25)
+		effects:shake(e.who == "player" and 1 or 0.6)
+		Sounds.play("Awaken", 1)
+	elseif e.kind == "specials" then
+		specialsHud:update(e.you, e.foe)
+		if type(e.you) == "table" then
+			Controller.setSpeedMultiplier(e.you.speed or 1)
+		end
+	elseif e.kind == "specialRefused" then
+		specialsHud:refused(e.index)
 	elseif e.kind == "finished" then
+		local won = e.outcome == "win"
+		specialsHud:showBanner(won and "WINNER!" or e.outcome == "loss" and "DEFEATED" or "DRAW", won and Color3.fromRGB(255, 220, 90) or Color3.fromRGB(255, 110, 110), false)
+		Sounds.play(won and "Win" or "Lose", 0.9)
 		hud:showResult(e, function()
 			remotes.Request:FireServer({ action = "rematch" })
 		end, function()
@@ -5737,6 +6158,9 @@ remotes.BattleEvent.OnClientEvent:Connect(function(e)
 	elseif e.kind == "closed" then
 		inBattle = false
 		hud:closeBattle()
+		specialsHud:show(false)
+		spirits:clear()
+		Controller.setSpeedMultiplier(1)
 	elseif e.kind == "openWorkshop" then
 		menus:open()
 	end
@@ -5750,8 +6174,8 @@ local function pressLaunch()
 	end
 	local t = Workspace:GetServerTimeNow()
 	local pos = LaunchCore.needle(meter, t)
-	local _, label = LaunchCore.quality(meter, pos, GameConfig.Launch)
-	hud:lockLaunch(pos, label)
+	local q, label = LaunchCore.quality(meter, pos, GameConfig.Launch)
+	hud:lockLaunch(pos, label, q)
 	remotes.Request:FireServer({ action = "launch", t = t })
 end
 UserInputService.InputBegan:Connect(function(input, processed)
@@ -5772,7 +6196,6 @@ RunService.RenderStepped:Connect(function()
 end)
 
 -- Live battle bars from the beys' Spin attributes (set by the server).
-local beys = Workspace:WaitForChild("Beys", 30)
 RunService.RenderStepped:Connect(function()
 	if not inBattle or not beys then
 		return
@@ -6158,6 +6581,643 @@ end
 
 return OnFootFallback
 ]=====])
+install('SPS', '', 'ModuleScript', 'Sounds', [=====[
+--!nonstrict
+-- Sounds: one place for every sound effect id. Empty ids are skipped (silent), so the game runs without any.
+-- To add sound: in Studio open the Toolbox > Audio (or the Creator Store), pick Roblox-made or your own uploaded
+-- sounds, copy the number from the asset URL and put "rbxassetid://<number>" here. Audio uploaded by other
+-- people usually won't play in your game (Roblox audio privacy), so prefer Roblox's own SFX or your uploads.
+
+local SoundService = game:GetService("SoundService")
+
+local Sounds = {}
+
+Sounds.Ids = {
+	Hit = "", -- metal clash, short
+	HitHeavy = "", -- bigger clash with a ring (empowered hits)
+	Launch = "", -- ripcord whoosh at LET IT RIP
+	Special = "", -- whoosh / roar when a special is used
+	Awaken = "", -- big roar + choir hit
+	Quake = "", -- deep boom
+	Guard = "", -- shield hum
+	Win = "", -- victory sting
+	Lose = "", -- defeat sting
+}
+
+-- Plays a sound once (2D, not positional). volume 0..1, pitch ~1.
+function Sounds.play(name, volume, pitch)
+	local id = Sounds.Ids[name]
+	if not id or id == "" then
+		return
+	end
+	local ok = pcall(function()
+		local s = Instance.new("Sound")
+		s.SoundId = id
+		s.Volume = volume or 0.6
+		s.PlaybackSpeed = pitch or 1
+		s.Parent = SoundService
+		s.Ended:Connect(function()
+			s:Destroy()
+		end)
+		s:Play()
+	end)
+	return ok
+end
+
+return Sounds
+]=====])
+install('SPS', '', 'ModuleScript', 'SpecialsHud', [=====[
+--!nonstrict
+-- SpecialsHud: the battle bar for special moves and Awakening, plus the big title banners.
+--   [1] Comet Drive  READY      [2] Iron Shell  6s        cards (tap/click to use too)
+--   AWAKENING ███████░░░ 64%    full: "AWAKEN READY  [R]" pulsing; awake: "AWAKENED" draining
+-- The server sends snapshots (cooldowns, meter) a few times a second; this only draws them.
+
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Shared = ReplicatedStorage:WaitForChild("Spinforge")
+local BeyConfig = require(Shared.BeyConfig)
+local Ui = require(script.Parent.Ui)
+local C = Ui.C
+
+local SpecialsHud = {}
+SpecialsHud.__index = SpecialsHud
+
+local KIND_TEXT = { dash = "ATTACK", guard = "DEFENSE", heal = "RECOVER", quake = "SHOCKWAVE" }
+
+local function keyText(i)
+	if UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled then
+		return ""
+	end
+	if UserInputService.GamepadEnabled and not UserInputService.KeyboardEnabled then
+		return i == 1 and "X" or i == 2 and "Y" or "LB"
+	end
+	return i == 1 and "1" or i == 2 and "2" or "R"
+end
+
+function SpecialsHud.new(hud, onUse, onAwaken)
+	local self = setmetatable({}, SpecialsHud)
+	self.hud = hud
+	local gui = hud.gui
+	local root = Ui.make("Frame", {
+		Name = "Specials",
+		AnchorPoint = Vector2.new(0.5, 1),
+		Position = UDim2.new(0.5, 0, 1, -60),
+		Size = UDim2.fromOffset(470, 92),
+		BackgroundTransparency = 1,
+		Visible = false,
+	}, gui)
+	self.root = root
+	self.cards = {}
+	for i = 1, 2 do
+		local card = Ui.make("TextButton", {
+			Position = UDim2.new((i - 1) * 0.5, i == 2 and 5 or 0, 0, 0),
+			Size = UDim2.new(0.5, -5, 0, 52),
+			BackgroundColor3 = C.panel,
+			BackgroundTransparency = 0.08,
+			AutoButtonColor = false,
+			Text = "",
+			Selectable = false,
+		}, root)
+		Ui.corner(card, 10)
+		local stroke = Ui.stroke(card, C.line, 2)
+		local fill = Ui.make("Frame", { Size = UDim2.fromScale(0, 1), BackgroundColor3 = Color3.new(0, 0, 0), BackgroundTransparency = 0.45, BorderSizePixel = 0, ZIndex = 3 }, card)
+		Ui.corner(fill, 10)
+		local key = Ui.label(card, {
+			Position = UDim2.fromOffset(8, 10),
+			Size = UDim2.fromOffset(32, 32),
+			BackgroundTransparency = 0,
+			BackgroundColor3 = C.panel2,
+			Font = Enum.Font.GothamBlack,
+			TextSize = 18,
+			TextXAlignment = Enum.TextXAlignment.Center,
+			Text = keyText(i),
+			ZIndex = 4,
+		})
+		Ui.corner(key, 7)
+		local name = Ui.label(card, { Position = UDim2.fromOffset(48, 7), Size = UDim2.new(1, -54, 0, 20), Font = Enum.Font.GothamBlack, TextSize = 16, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 4 })
+		local status = Ui.label(card, { Position = UDim2.fromOffset(48, 28), Size = UDim2.new(1, -54, 0, 16), Font = Enum.Font.GothamBold, TextSize = 12, TextColor3 = C.muted, ZIndex = 4 })
+		card.Activated:Connect(function()
+			onUse(i)
+		end)
+		self.cards[i] = { frame = card, stroke = stroke, fill = fill, key = key, name = name, status = status, ready = false }
+	end
+	local meterBack = Ui.make("Frame", { Position = UDim2.fromOffset(0, 60), Size = UDim2.new(1, 0, 0, 26), BackgroundColor3 = C.panel, BackgroundTransparency = 0.08, BorderSizePixel = 0 }, root)
+	Ui.corner(meterBack, 8)
+	Ui.stroke(meterBack, C.line, 1)
+	self.meterFill = Ui.make("Frame", { Size = UDim2.fromScale(0, 1), BackgroundColor3 = C.gold, BorderSizePixel = 0 }, meterBack)
+	Ui.corner(self.meterFill, 8)
+	Ui.make("UIGradient", { Color = ColorSequence.new(Color3.fromRGB(255, 170, 40), Color3.fromRGB(255, 240, 150)) }, self.meterFill)
+	self.meterText = Ui.make("TextButton", {
+		Size = UDim2.fromScale(1, 1),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.GothamBlack,
+		TextSize = 14,
+		TextColor3 = C.text,
+		TextStrokeTransparency = 0.4,
+		Text = "AWAKENING 0%",
+		AutoButtonColor = false,
+		Selectable = false,
+		ZIndex = 3,
+	}, meterBack)
+	self.meterText.Activated:Connect(onAwaken)
+	self.meterStroke = meterBack:FindFirstChildOfClass("UIStroke")
+
+	-- foe's awakening (thin bar under the foe's spin bar)
+	self.foeMeter = Ui.bar(hud.battleFrame, { Position = UDim2.new(0.58, 0, 1, -4), Size = UDim2.new(0.42, 0, 0, 4) }, C.gold)
+
+	-- big title banner (special names, AWAKENS!, WINNER)
+	local banner = Ui.make("TextLabel", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.27),
+		Size = UDim2.fromOffset(900, 80),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.LuckiestGuy,
+		TextSize = 64,
+		TextColor3 = Color3.new(1, 1, 1),
+		Text = "",
+		Visible = false,
+		ZIndex = 15,
+	}, gui)
+	self.bannerStroke = Ui.make("UIStroke", { Thickness = 4, Color = Color3.fromRGB(20, 10, 30), ApplyStrokeMode = Enum.ApplyStrokeMode.Contextual }, banner)
+	self.bannerGradient = Ui.make("UIGradient", { Rotation = 90 }, banner)
+	self.banner = banner
+	self.bannerScale = Ui.make("UIScale", { Scale = 1 }, banner)
+
+	-- screen tint for awakenings
+	self.tint = Ui.make("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, BorderSizePixel = 0, ZIndex = 1 }, gui)
+	return self
+end
+
+-- Called when a battle starts: which specials this player brought.
+function SpecialsHud:setLoadout(ids)
+	for i, card in ipairs(self.cards) do
+		local def = BeyConfig.Specials[ids and ids[i] or ""]
+		card.def = def
+		card.name.Text = def and def.Name or "Empty"
+		card.name.TextColor3 = def and def.Color or C.muted
+		card.status.Text = def and KIND_TEXT[def.Kind] or ""
+		card.key.Text = keyText(i)
+		card.fill.Size = UDim2.fromScale(1, 1)
+	end
+	self.meterFill.Size = UDim2.fromScale(0, 1)
+	self.meterText.Text = "AWAKENING 0%   [" .. keyText(3) .. "]"
+	self.awakeUntil = nil
+end
+
+function SpecialsHud:show(visible)
+	self.root.Visible = visible
+	if not visible then
+		self.tint.BackgroundTransparency = 1
+	end
+end
+
+-- snap = { specials = { { left, cooldown } x2 }, meter = 0..1, awakened, awakenUsed } from the server.
+function SpecialsHud:update(snap, foe)
+	if type(snap) == "table" and type(snap.specials) == "table" then
+		for i, card in ipairs(self.cards) do
+			local s = snap.specials[i]
+			if s and card.def then
+				local left = tonumber(s.left) or 0
+				local cd = math.max(tonumber(s.cooldown) or 1, 0.01)
+				local ready = left <= 0.05
+				card.fill.Size = UDim2.fromScale(ready and 0 or math.clamp(left / cd, 0, 1), 1)
+				card.status.Text = ready and ("READY  ·  " .. KIND_TEXT[card.def.Kind]) or ("%.1fs"):format(left)
+				card.status.TextColor3 = ready and C.good or C.muted
+				card.stroke.Color = ready and card.def.Color or C.line
+				if ready and not card.ready then
+					card.frame.Size = UDim2.new(0.5, -5, 0, 58)
+					TweenService:Create(card.frame, TweenInfo.new(0.2), { Size = UDim2.new(0.5, -5, 0, 52) }):Play()
+				end
+				card.ready = ready
+			end
+		end
+		local m = math.clamp(tonumber(snap.meter) or 0, 0, 1)
+		if snap.awakened then
+			self.meterText.Text = "AWAKENED!"
+			self.meterFill.Size = UDim2.fromScale(1, 1)
+		elseif snap.awakenUsed then
+			self.meterText.Text = "AWAKENING USED"
+			self.meterFill.Size = UDim2.fromScale(0, 1)
+		elseif m >= 1 then
+			self.meterText.Text = "AWAKEN READY!   PRESS [" .. keyText(3) .. "]"
+			self.meterFill.Size = UDim2.fromScale(1, 1)
+			if self.meterStroke then
+				self.meterStroke.Color = (math.floor(os.clock() * 3) % 2 == 0) and C.gold or C.line
+				self.meterStroke.Thickness = 2
+			end
+		else
+			self.meterText.Text = ("AWAKENING %d%%   [%s]"):format(math.floor(m * 100), keyText(3))
+			self.meterFill.Size = UDim2.fromScale(m, 1)
+			if self.meterStroke then
+				self.meterStroke.Color = C.line
+				self.meterStroke.Thickness = 1
+			end
+		end
+	end
+	if type(foe) == "table" then
+		self.foeMeter.Size = UDim2.fromScale(foe.awakened and 1 or math.clamp(tonumber(foe.meter) or 0, 0, 1), 1)
+	end
+end
+
+-- Pressed but refused (cooldown): shake the card.
+function SpecialsHud:refused(i)
+	local card = self.cards[i]
+	if not card then
+		return
+	end
+	local p = card.frame.Position
+	card.frame.Position = p + UDim2.fromOffset(6, 0)
+	TweenService:Create(card.frame, TweenInfo.new(0.15, Enum.EasingStyle.Elastic), { Position = p }):Play()
+end
+
+-- Big title text: special names, "... AWAKENS!", WINNER. small = the foe's (smaller, lower).
+function SpecialsHud:showBanner(text, color, small)
+	local b = self.banner
+	b.Text = text
+	b.TextSize = small and 40 or 64
+	b.Position = UDim2.fromScale(0.5, small and 0.2 or 0.27)
+	color = color or Color3.new(1, 1, 1)
+	self.bannerGradient.Color = ColorSequence.new(Color3.new(1, 1, 1), color)
+	b.TextTransparency = 0
+	self.bannerStroke.Transparency = 0
+	b.Visible = true
+	self.bannerScale.Scale = 1.6
+	TweenService:Create(self.bannerScale, TweenInfo.new(0.25, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = 1 }):Play()
+	local token = {}
+	self._banner = token
+	task.delay(small and 1.0 or 1.3, function()
+		if self._banner ~= token then
+			return
+		end
+		TweenService:Create(b, TweenInfo.new(0.3), { TextTransparency = 1 }):Play()
+		TweenService:Create(self.bannerStroke, TweenInfo.new(0.3), { Transparency = 1 }):Play()
+		task.delay(0.32, function()
+			if self._banner == token then
+				b.Visible = false
+			end
+		end)
+	end)
+end
+
+-- Coloured screen wash (awakening).
+function SpecialsHud:wash(color, strength)
+	self.tint.BackgroundColor3 = color
+	self.tint.BackgroundTransparency = 1 - (strength or 0.35)
+	TweenService:Create(self.tint, TweenInfo.new(1.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { BackgroundTransparency = 1 }):Play()
+end
+
+return SpecialsHud
+]=====])
+install('SPS', '', 'ModuleScript', 'Spirits', [=====[
+--!nonstrict
+-- Spirits: the giant glowing creature that appears when a bey uses a special or awakens. Client-only visuals.
+--   summon(o)  o = { spirit = id, body = the bey's Body part, kind = "special" | "awaken", special = "dash" |
+--              "guard" | "heal" | "quake", dir = Vector3 (toward the foe), face = function() -> Vector3 | nil
+--              (a point to face while awakened), duration = seconds (awaken), big = bool (your own bey) }
+-- The creature uses the Blender mesh from ReplicatedStorage.SpiritMeshes when it has been imported (README), and a
+-- simple beast built from parts otherwise. Material ForceField (translucent shimmer) over a faint Neon core, so it
+-- glows and you can still see the battle through it.
+-- Unverified in Roblox: the look, the timing and the mesh orientation (the mesh should face -Z; see SPIN_FIX).
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+
+local Shared = ReplicatedStorage:WaitForChild("Spinforge")
+local BeyConfig = require(Shared.BeyConfig)
+local meshData = {}
+do
+	local mod = Shared:FindFirstChild("SpiritMeshData")
+	if mod then
+		local ok, data = pcall(require, mod)
+		if ok and type(data) == "table" then
+			meshData = data
+		end
+	end
+end
+
+local Spirits = {}
+Spirits.__index = Spirits
+
+local MAX_ACTIVE = 3
+local SPIN_FIX = CFrame.new() -- extra rotation if the imported mesh doesn't face -Z (e.g. CFrame.Angles(0, math.pi, 0))
+local SPECIAL_HEIGHT = 10 -- studs tall when it appears for a special (a bey is ~4 wide)
+local AWAKEN_HEIGHT = 15
+local SPECIAL_TIME = 1.4
+
+function Spirits.new(effects, hooks)
+	local self = setmetatable({}, Spirits)
+	self.effects = effects
+	self.hooks = hooks or {} -- { cinematic = function(duration, zoom), banner = function(text, color, small) }
+	self.active = {}
+	self.folder = Instance.new("Folder")
+	self.folder.Name = "SpinforgeSpirits"
+	self.folder.Parent = Workspace
+	return self
+end
+
+local function lerp(a, b, t)
+	return a + (b - a) * t
+end
+
+local function easeOutBack(t)
+	local c1, c3 = 1.70158, 2.70158
+	return 1 + c3 * (t - 1) ^ 3 + c1 * (t - 1) ^ 2
+end
+
+local function styled(p, color, material, transparency)
+	p.Anchored = true
+	p.CanCollide = false
+	p.CanQuery = false
+	p.CanTouch = false
+	p.CastShadow = false
+	p.Massless = true
+	p.Material = material
+	p.Color = color
+	p.Transparency = transparency
+	p:SetAttribute("BaseTransparency", transparency)
+end
+
+-- A beast from basic parts (used until the Blender meshes are imported). About 1 stud tall; scaled later.
+local function fallbackBeast(color)
+	local m = Instance.new("Model")
+	local function part(shape, size, cf)
+		local p = Instance.new("Part")
+		p.Shape = shape
+		p.Size = size
+		p.CFrame = cf
+		styled(p, color, Enum.Material.ForceField, 0)
+		p.Parent = m
+		return p
+	end
+	local B, Cy = Enum.PartType.Ball, Enum.PartType.Cylinder
+	local body = part(B, Vector3.new(0.55, 0.5, 1.1), CFrame.new(0, 0.62, 0.05))
+	part(B, Vector3.new(0.42, 0.4, 0.5), CFrame.new(0, 0.86, -0.55)) -- head, facing -Z
+	part(B, Vector3.new(0.2, 0.18, 0.3), CFrame.new(0, 0.8, -0.82)) -- snout
+	for _, sx in ipairs({ -1, 1 }) do
+		part(Enum.PartType.Block, Vector3.new(0.07, 0.32, 0.07), CFrame.new(0.14 * sx, 1.12, -0.5) * CFrame.Angles(math.rad(-25), 0, math.rad(-20 * sx))) -- horns
+		part(Cy, Vector3.new(0.48, 0.13, 0.13), CFrame.new(0.17 * sx, 0.24, -0.32) * CFrame.Angles(0, 0, math.rad(90))) -- front legs
+		part(Cy, Vector3.new(0.48, 0.14, 0.14), CFrame.new(0.17 * sx, 0.24, 0.4) * CFrame.Angles(0, 0, math.rad(90))) -- back legs
+	end
+	part(Enum.PartType.Block, Vector3.new(0.08, 0.08, 0.55), CFrame.new(0, 0.78, 0.78) * CFrame.Angles(math.rad(35), 0, 0)) -- tail
+	m.PrimaryPart = body
+	return m, Vector3.new(0.6, 1.25, 1.6)
+end
+
+-- Returns a Model (pivot at the creature's feet, facing -Z) and its unscaled size.
+local function buildCreature(id, color)
+	local folder = ReplicatedStorage:FindFirstChild("SpiritMeshes")
+	local template = folder and folder:FindFirstChild(id, true)
+	local size = meshData[id] and meshData[id].Size
+	if template and template:IsA("MeshPart") and size then
+		local m = Instance.new("Model")
+		local shell = template:Clone()
+		shell.Size = size
+		shell.CFrame = CFrame.new(0, size.Y / 2, 0) * SPIN_FIX
+		styled(shell, color, Enum.Material.ForceField, 0)
+		shell.Parent = m
+		local core = template:Clone()
+		core.Size = size * 0.97
+		core.CFrame = shell.CFrame
+		styled(core, color, Enum.Material.Neon, 0.82)
+		core.Parent = m
+		local base = Instance.new("Part")
+		base.Name = "Pivot"
+		base.Size = Vector3.new(0.1, 0.1, 0.1)
+		base.CFrame = CFrame.new()
+		styled(base, color, Enum.Material.SmoothPlastic, 1)
+		base.Parent = m
+		m.PrimaryPart = base
+		return m, size
+	end
+	local m, s = fallbackBeast(color)
+	local base = Instance.new("Part")
+	base.Name = "Pivot"
+	base.Size = Vector3.new(0.1, 0.1, 0.1)
+	base.CFrame = CFrame.new()
+	styled(base, color, Enum.Material.SmoothPlastic, 1)
+	base.Parent = m
+	m.PrimaryPart = base
+	return m, s
+end
+
+local function setAlpha(model, alpha)
+	for _, p in ipairs(model:GetDescendants()) do
+		if p:IsA("BasePart") then
+			local base = p:GetAttribute("BaseTransparency") or 0
+			p.Transparency = base >= 1 and 1 or lerp(1, base, alpha)
+		end
+	end
+end
+
+local function addGlow(model, color, range)
+	local att = Instance.new("Attachment")
+	att.Position = Vector3.new(0, 0.5, 0)
+	att.Parent = model.PrimaryPart
+	local light = Instance.new("PointLight")
+	light.Color = color
+	light.Range = range
+	light.Brightness = 3
+	light.Shadows = false
+	light.Parent = model.PrimaryPart
+	local pe = Instance.new("ParticleEmitter")
+	pe.Texture = "rbxasset://textures/particles/sparkles_main.dds"
+	pe.Color = ColorSequence.new(Color3.new(1, 1, 1), color)
+	pe.LightEmission = 1
+	pe.LightInfluence = 0
+	pe.Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.6), NumberSequenceKeypoint.new(1, 0) })
+	pe.Lifetime = NumberRange.new(0.5, 1.1)
+	pe.Speed = NumberRange.new(4, 10)
+	pe.SpreadAngle = Vector2.new(60, 60)
+	pe.EmissionDirection = Enum.NormalId.Top
+	pe.Rate = 40
+	pe.Parent = att
+	return light, pe
+end
+
+function Spirits:_retire(entry)
+	if entry.conn then
+		entry.conn:Disconnect()
+	end
+	if entry.model then
+		entry.model:Destroy()
+	end
+	for _, extra in ipairs(entry.extras or {}) do
+		extra:Destroy()
+	end
+	for i, e in ipairs(self.active) do
+		if e == entry then
+			table.remove(self.active, i)
+			break
+		end
+	end
+end
+
+function Spirits:summon(o)
+	local def = BeyConfig.Spirits[o.spirit]
+	local body = o.body
+	if not def or not body or not body.Parent then
+		return
+	end
+	while #self.active >= MAX_ACTIVE do
+		self:_retire(self.active[1])
+	end
+	local color = def.Color
+	local awaken = o.kind == "awaken"
+	local model, size = buildCreature(o.spirit, color)
+	local height = awaken and AWAKEN_HEIGHT or SPECIAL_HEIGHT * (o.big and 1 or 0.9)
+	local scale = height / math.max(size.Y, 0.01)
+	model.Name = o.spirit
+	model.Parent = self.folder
+	local light = addGlow(model, color, awaken and 40 or 28)
+	local entry = { model = model, extras = {} }
+	table.insert(self.active, entry)
+
+	local dir = o.dir
+	if typeof(dir) ~= "Vector3" or dir.Magnitude < 0.01 then
+		dir = Vector3.new(0, 0, -1)
+	end
+	dir = Vector3.new(dir.X, 0, dir.Z).Unit
+	local start = os.clock()
+	local total = awaken and (o.duration or 10) + 1.4 or SPECIAL_TIME
+	local smoothPos = body.Position
+
+	-- the opening flourish
+	local ground = body.Position - Vector3.new(0, 1.8, 0)
+	self.effects:burst(ground, color, awaken and 26 or 16)
+	if awaken then
+		entry.extras = self:_sigil(ground, color)
+	end
+	if self.hooks.banner then
+		local name = BeyConfig.Specials[o.id or ""] and BeyConfig.Specials[o.id].Name or def.Name
+		local text = awaken and (string.upper(def.Name) .. " AWAKENS!") or (string.upper(name) .. "!")
+		self.hooks.banner(text, color, not o.big)
+	end
+	if o.big and self.hooks.cinematic then
+		self.hooks.cinematic(awaken and 1.6 or 0.9, awaken and 0.5 or 0.7)
+	end
+
+	entry.conn = RunService.RenderStepped:Connect(function(dt)
+		local t = os.clock() - start
+		if t >= total or not body.Parent then
+			self:_retire(entry)
+			return
+		end
+		smoothPos = smoothPos:Lerp(body.Position, 1 - math.exp(-12 * dt))
+		local base = smoothPos - Vector3.new(0, 1.8, 0)
+		local facing = dir
+		local s, alpha, offset = 1, 1, Vector3.zero
+		if awaken then
+			local target = o.face and o.face()
+			if typeof(target) == "Vector3" then
+				local d = Vector3.new(target.X - smoothPos.X, 0, target.Z - smoothPos.Z)
+				if d.Magnitude > 0.5 then
+					facing = d.Unit
+					dir = facing
+				end
+			end
+			local rise = math.clamp(t / 0.6, 0, 1)
+			offset = Vector3.new(0, -height * (1 - easeOutBack(rise)) * 0.6, 0) - facing * 2.5
+			alpha = t < 1.6 and 1 or 0.6 -- full for the reveal, then lighter so the fight stays readable
+			if t > total - 0.6 then
+				alpha = 0.6 * (total - t) / 0.6
+			end
+			offset += Vector3.new(0, math.sin(t * 2.2) * 0.4, 0)
+		else
+			local k = o.special
+			if t < 0.22 then
+				local a = t / 0.22
+				s = lerp(0.3, 1, easeOutBack(a))
+				alpha = a
+			elseif t < 0.5 then
+				offset = Vector3.new(0, math.sin((t - 0.22) * 18) * 0.3, 0)
+			elseif t < 1.05 then
+				local a = (t - 0.5) / 0.55
+				if k == "dash" or k == "quake" then
+					offset = dir * (a * a * 14) -- lunges at the foe
+					if k == "quake" then
+						offset += Vector3.new(0, math.sin(a * math.pi) * 4, 0)
+					end
+				elseif k == "heal" then
+					offset = Vector3.new(0, a * 4, 0)
+				else -- guard: rears up and circles the bey
+					facing = (CFrame.Angles(0, a * math.pi * 0.8, 0) * dir)
+				end
+			else
+				local a = (t - 1.05) / (SPECIAL_TIME - 1.05)
+				s = 1 + a * 0.15
+				alpha = 1 - a
+				offset = (k == "dash" or k == "quake") and dir * 14 or Vector3.zero
+			end
+			offset -= dir * 2
+		end
+		local pos = base + offset
+		model:PivotTo(CFrame.lookAt(pos, pos + facing))
+		pcall(function()
+			model:ScaleTo(scale * s)
+		end)
+		setAlpha(model, alpha)
+		light.Brightness = 3 * alpha
+	end)
+end
+
+-- Awakening: a glowing sigil on the floor and a pillar of light. Returns the parts (removed with the creature).
+function Spirits:_sigil(ground, color)
+	local parts = {}
+	local function neon(shape, size, cf, transparency)
+		local p = Instance.new("Part")
+		p.Shape = shape
+		p.Size = size
+		p.CFrame = cf
+		styled(p, color, Enum.Material.Neon, transparency)
+		p.Parent = self.folder
+		table.insert(parts, p)
+		return p
+	end
+	local ring = neon(Enum.PartType.Cylinder, Vector3.new(0.15, 26, 26), CFrame.new(ground) * CFrame.Angles(0, 0, math.rad(90)), 0.35)
+	local inner = neon(Enum.PartType.Cylinder, Vector3.new(0.16, 18, 18), CFrame.new(ground + Vector3.new(0, 0.02, 0)) * CFrame.Angles(0, 0, math.rad(90)), 0.75)
+	local spokes = {}
+	for i = 0, 5 do
+		local a = i * math.pi / 3
+		table.insert(spokes, neon(Enum.PartType.Block, Vector3.new(0.6, 0.18, 24), CFrame.new(ground + Vector3.new(0, 0.05, 0)) * CFrame.Angles(0, a, 0), 0.45))
+	end
+	local pillar = neon(Enum.PartType.Cylinder, Vector3.new(80, 5, 5), CFrame.new(ground + Vector3.new(0, 40, 0)) * CFrame.Angles(0, 0, math.rad(90)), 0.25)
+	local start = os.clock()
+	local conn
+	conn = RunService.RenderStepped:Connect(function()
+		local t = os.clock() - start
+		if t > 1.6 or not ring.Parent then
+			conn:Disconnect()
+			for _, p in ipairs(parts) do
+				p:Destroy()
+			end
+			return
+		end
+		local spin = CFrame.Angles(0, t * 2.5, 0)
+		for i, p in ipairs(spokes) do
+			p.CFrame = CFrame.new(ground + Vector3.new(0, 0.05, 0)) * spin * CFrame.Angles(0, (i - 1) * math.pi / 3, 0)
+			p.Transparency = lerp(0.45, 1, math.clamp((t - 0.9) / 0.7, 0, 1))
+		end
+		ring.Transparency = lerp(0.35, 1, math.clamp((t - 0.9) / 0.7, 0, 1))
+		inner.Transparency = lerp(0.75, 1, math.clamp((t - 0.9) / 0.7, 0, 1))
+		local w = 5 + t * 6
+		pillar.Size = Vector3.new(80, w, w)
+		pillar.Transparency = lerp(0.25, 1, math.clamp(t / 1.2, 0, 1))
+	end)
+	return parts
+end
+
+function Spirits:clear()
+	while #self.active > 0 do
+		self:_retire(self.active[1])
+	end
+end
+
+return Spirits
+]=====])
 install('SPS', '', 'ModuleScript', 'Tutorial', [=====[
 --!nonstrict
 -- Tutorial: short contextual hints shown while you control a bey, until you've done each thing once:
@@ -6350,4 +7410,4 @@ end
 
 return Ui
 ]=====])
-print('Spinforge installed: 30 scripts. Press Play.')
+print('Spinforge installed: 33 scripts. Press Play.')

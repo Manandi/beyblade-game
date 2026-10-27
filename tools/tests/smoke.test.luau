@@ -263,7 +263,22 @@ T.test("specials: used through the server, cooldowns refuse spam, HUD snapshots 
 	T.eq(used[#used].special, "dash")
 	T.ok(used[#used].dash and used[#used].dash > 0, "dash speed sent to the client")
 	T.eq(used[#used].spirit, "spirit_emberwolf", "the spirit appears with it")
-	request(alice, { action = "special", index = 1 })
+	-- the client shows the creature and the specials bar
+	local spiritsFolder = S.Workspace:FindFirstChild("SpinforgeSpirits")
+	T.ok(spiritsFolder and spiritsFolder:FindFirstChild("spirit_emberwolf"), "the spirit creature appears on the client")
+	local bar = alice.PlayerGui.SpinforgeHud:FindFirstChild("Specials")
+	T.ok(bar and bar.Visible, "specials bar visible in battle")
+	T.ok(bodyOf(alice).AssemblyLinearVelocity.Magnitude > 50, "the dash bursts our bey forward")
+	for _ = 1, 100 do -- the mock has no walls: hold both beys apart so nobody rings out
+		vb.CFrame = CFrame.new(-10, 3, 0)
+		vb.AssemblyLinearVelocity = Vector3.zero
+		pb.CFrame = CFrame.new(10, 3, 0)
+		pb.AssemblyLinearVelocity = Vector3.zero
+		Mock.advance(1 / 60)
+	end
+	T.ok(not spiritsFolder:FindFirstChild("spirit_emberwolf"), "the creature goes away after the special")
+	-- keys: 1 again (cooldown) through the real input path
+	S.UserInputService.InputBegan:Fire({ KeyCode = Enum.KeyCode.One, UserInputType = Enum.UserInputType.Keyboard }, false)
 	Mock.advance(1 / 60)
 	T.eq(#events(alice, "specialRefused"), refused0 + 1, "cooldown refuses a second use")
 	request(alice, { action = "special", index = 2 })
@@ -291,6 +306,36 @@ T.test("specials: used through the server, cooldowns refuse spam, HUD snapshots 
 	request(alice, { action = "awaken" })
 	Mock.advance(1 / 60)
 	T.ok(awakenings() <= 1, "never twice")
+	-- the client handles the villain's awakening and quake (sent straight to the client here)
+	remotes.BattleEvent:FireClient(alice, { kind = "awaken", who = "villain", spirit = "spirit_thornstag", at = vb.Position, duration = 1 })
+	remotes.BattleEvent:FireClient(alice, { kind = "special", who = "villain", id = "special_quakestomp", special = "quake", spirit = "spirit_thornstag", at = vb.Position, dir = Vector3.new(1, 0, 0), hit = true, dealt = 5 })
+	Mock.advance(1 / 60)
+	T.ok(spiritsFolder:FindFirstChild("spirit_thornstag"), "the villain's spirit appears")
+	for _ = 1, 160 do
+		vb.CFrame = CFrame.new(-10, 3, 0)
+		vb.AssemblyLinearVelocity = Vector3.zero
+		pb.CFrame = CFrame.new(10, 3, 0)
+		pb.AssemblyLinearVelocity = Vector3.zero
+		Mock.advance(1 / 60)
+	end
+	local fin = events(alice, "finished")
+	T.eq(#fin, 0, #fin > 0 and ("battle ended early: " .. tostring(fin[#fin].outcome) .. " " .. tostring(fin[#fin].reason)) or "")
+	T.ok(not spiritsFolder:FindFirstChild("spirit_thornstag"), "and leaves when it ends")
+	-- V switches to the overhead view and back
+	S.UserInputService.InputBegan:Fire({ KeyCode = Enum.KeyCode.V, UserInputType = Enum.UserInputType.Keyboard }, false)
+	for _ = 1, 30 do
+		vb.CFrame = CFrame.new(-10, 3, 0)
+		vb.AssemblyLinearVelocity = Vector3.zero
+		pb.CFrame = CFrame.new(10, 3, 0)
+		pb.AssemblyLinearVelocity = Vector3.zero
+		Mock.advance(1 / 60)
+	end
+	T.eq(alice:GetAttribute("CameraMode"), "Overhead")
+	local cam = S.Workspace.CurrentCamera.CFrame.Position
+	T.ok(cam.Y > bodyOf(alice).Position.Y + 25, "camera is high above the stadium: " .. cam.Y)
+	S.UserInputService.InputBegan:Fire({ KeyCode = Enum.KeyCode.V, UserInputType = Enum.UserInputType.Keyboard }, false)
+	Mock.advance(1 / 60)
+	T.eq(alice:GetAttribute("CameraMode"), "Bey")
 	T.eq(alice:GetAttribute("BattleState"), "active")
 	noErrors("specials")
 end)

@@ -10,6 +10,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared = ReplicatedStorage:WaitForChild("Spinforge")
 local BeyConfig = require(Shared.BeyConfig)
 local BeyVisuals = require(Shared.BeyVisuals)
+local BeyDesigns = require(Shared.BeyDesigns)
 local GameConfig = require(Shared.GameConfig)
 local CombatCore = require(Shared.Core.CombatCore)
 
@@ -24,6 +25,10 @@ function BeyFactory.build(opts)
 	local model = Instance.new("Model")
 	model.Name = opts.name
 	model.Parent = opts.parent -- parented first so the welds capture the layout
+	local design = BeyDesigns.Parts[opts.partIds.Layer]
+	if design then
+		model:SetAttribute("Accent", design.Accent) -- trail and glow colour (client effects)
+	end
 
 	local body = Instance.new("Part")
 	body.Name = "Body"

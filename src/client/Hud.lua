@@ -98,7 +98,7 @@ function Hud.new(player)
 	self.slamFrame = sl
 	self.lowSpin = Ui.label(gui, {
 		AnchorPoint = Vector2.new(0.5, 1),
-		Position = UDim2.new(0.5, 0, 1, -58),
+		Position = UDim2.new(0.5, 0, 1, -158),
 		Size = UDim2.fromOffset(300, 26),
 		TextXAlignment = Enum.TextXAlignment.Center,
 		Font = Enum.Font.GothamBlack,
@@ -129,7 +129,7 @@ function Hud.new(player)
 	self.resultFrame = rp
 
 	-- launch meter (during the countdown): a needle sweeps across; lock it in the green zone
-	local lm = Ui.panel(gui, { Name = "Launch", AnchorPoint = Vector2.new(0.5, 1), Position = UDim2.new(0.5, 0, 1, -70), Size = UDim2.fromOffset(460, 92), Visible = false, ZIndex = 8 })
+	local lm = Ui.panel(gui, { Name = "Launch", AnchorPoint = Vector2.new(0.5, 1), Position = UDim2.new(0.5, 0, 1, -160), Size = UDim2.fromOffset(460, 92), Visible = false, ZIndex = 8 })
 	Ui.pad(lm, 10)
 	self.launchTitle = Ui.label(lm, { Size = UDim2.new(1, 0, 0, 20), Font = Enum.Font.GothamBlack, TextSize = 18, TextXAlignment = Enum.TextXAlignment.Center, Text = "LAUNCH: stop the needle in the GREEN", ZIndex = 9 })
 	local track = Ui.make("Frame", { Position = UDim2.fromOffset(0, 28), Size = UDim2.new(1, 0, 0, 22), BackgroundColor3 = Color3.fromRGB(70, 30, 30), BorderSizePixel = 0, ZIndex = 9 }, lm)
@@ -286,12 +286,12 @@ function Hud:setNeedle(pos)
 	end
 end
 
-function Hud:lockLaunch(pos, label)
+function Hud:lockLaunch(pos, label, quality)
 	self.launchLocked = true
 	if pos then
 		self.launchNeedle.Position = UDim2.fromScale(math.clamp(pos, 0, 1), 0.5)
 	end
-	self.launchTitle.Text = label .. "!"
+	self.launchTitle.Text = label .. "!" .. (type(quality) == "number" and ("  %d%%"):format(math.floor(math.clamp(quality, 0, 1) * 100 + 0.5)) or "")
 	self.launchTitle.TextColor3 = LAUNCH_COLOR[label] or C.text
 	self.touchLaunch.Visible = false
 end

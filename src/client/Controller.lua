@@ -9,6 +9,8 @@
 --   tilt      mouse / right stick / drag on the right half of the screen   (down = lean in, up = brake)
 --   jump      Space / gamepad A / JUMP button          slam   click / right trigger / SLAM button (in the air)
 --   practice  R or gamepad Y = reset bey, Q or gamepad B = back to the hub
+--   camera    V or gamepad D-pad up = switch between the bey camera and the overhead stadium view
+--             (overhead: W is always "up the screen", the mouse only tilts)
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -24,6 +26,8 @@ local LaunchCore = require(Shared.Core.LaunchCore)
 
 local M = BeyConfig.Movement
 local MAX_TILT = math.rad(M.MaxTiltDeg)
+local BASE_FOV = 70
+local OVERHEAD = { Height = 58, Back = 34, Follow = 0.35, Blend = 6 } -- overhead view: how high, how far back, how much it follows your bey
 
 local Controller = {}
 
@@ -45,10 +49,18 @@ function Controller.start(ctx)
 	local jumpQueued, slamQueued = false, false
 	local pendingKnockback = Vector3.zero
 	local pendingLaunch = nil -- { speed, boost } from the server's "started" event
+	local pendingDash = nil -- { speed, dir } from a dash special
 	local launchBoost, launchAt = 0, -math.huge
 	local focus
 	local movedFor, fastAt = 0, -math.huge
 	local flipsAt, flipsRate, lastFlips = os.clock(), 0, 0
+	local camMode = player:GetAttribute("CameraMode") == "Overhead" and "Overhead" or "Bey"
+	local overheadYaw = 0
+	local overheadBlend = camMode == "Overhead" and 1 or 0
+	local speedMul = 1 -- spirit passive / awakening, from the server's snapshots
+	local cine = { untilT = 0, zoom = 1, len = 1 } -- short zoom-in when you use a special
+	local zoomNow = 1
+	local lastCam
 
 	local rayParams = RaycastParams.new()
 	rayParams.FilterType = Enum.RaycastFilterType.Exclude
@@ -186,6 +198,13 @@ function Controller.start(ctx)
 			slamQueued = true
 		elseif kc == Enum.KeyCode.Space or kc == Enum.KeyCode.ButtonA then
 			jumpQueued = true
+		elseif kc == Enum.KeyCode.V or kc == Enum.KeyCode.DPadUp then
+			camMode = camMode == "Overhead" and "Bey" or "Overhead"
+			player:SetAttribute("CameraMode", camMode)
+			if camMode == "Overhead" then
+				overheadYaw = yaw
+			end
+			hud:toast(camMode == "Overhead" and "Overhead view  (V to switch back)" or "Bey view  (V for overhead)")
 		elseif (kc == Enum.KeyCode.R or kc == Enum.KeyCode.ButtonY) and mode() == "Practice" then
 			resetBey()
 		elseif (kc == Enum.KeyCode.Q or kc == Enum.KeyCode.ButtonB) and mode() == "Practice" then
@@ -217,6 +236,7 @@ function Controller.start(ctx)
 		tutorial:setActive(false)
 		-- Always give the normal camera and mouse back.
 		camera.CameraType = Enum.CameraType.Custom
+		camera.FieldOfView = BASE_FOV
 		local hum = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
 		if hum then
 			camera.CameraSubject = hum
@@ -237,9 +257,11 @@ function Controller.start(ctx)
 		clearInputs()
 		pendingKnockback = Vector3.zero
 		pendingLaunch, launchBoost, launchAt = nil, 0, -math.huge
+		speedMul, pendingDash = 1, nil
 		local look = body.CFrame.LookVector
 		yaw = math.atan2(-look.X, -look.Z)
 		noseYaw, pitch, up, focus = yaw, 0, Vector3.yAxis, nil
+		overheadYaw = yaw
 		camera.CameraSubject = body
 		hud:showTouchButtons(true)
 		tutorial:setActive(true)
@@ -311,7 +333,7 @@ function Controller.start(ctx)
 		if wish.Magnitude > 1 then
 			wish = wish.Unit
 		end
-		local speed = MC.topSpeed(stats(), M) * LaunchCore.boostMultiplier(launchBoost, now - launchAt, GameConfig.Launch)
+		local speed = MC.topSpeed(stats(), M) * LaunchCore.boostMultiplier(launchBoost, now - launchAt, GameConfig.Launch) * speedMul
 
 		-- LET IT RIP: shoot off the line where the camera is aiming.
 		if pendingLaunch then
@@ -320,6 +342,13 @@ function Controller.start(ctx)
 			vel = Vector3.new(aim.X * pendingLaunch.speed, vel.Y, aim.Z * pendingLaunch.speed)
 			launchBoost, launchAt = pendingLaunch.boost, now
 			pendingLaunch = nil
+		end
+
+		-- dash special: burst toward the foe (the server already counted it; this only moves our own bey)
+		if pendingDash then
+			local d = pendingDash.dir
+			vel = Vector3.new(d.X * pendingDash.speed, math.max(vel.Y, 0) + 6, d.Z * pendingDash.speed)
+			pendingDash = nil
 		end
 
 		-- ground probe: a sphere cast (wider than a ray, so slab seams don't drop us), ray as fallback
@@ -431,18 +460,50 @@ function Controller.start(ctx)
 			UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter
 			UserInputService.MouseIconEnabled = false
 			local delta = UserInputService:GetMouseDelta()
-			yaw -= delta.X * M.MouseSensitivity
+			if camMode ~= "Overhead" then
+				yaw -= delta.X * M.MouseSensitivity
+			end
 			pitch = math.clamp(pitch - delta.Y * M.MouseSensitivity, -MAX_TILT, MAX_TILT)
 		end
+		if camMode == "Overhead" then
+			yaw = overheadYaw -- W = up the screen
+		end
+		-- impact freeze: hold the camera for a moment on a hit
+		if lastCam and effects:frozen() then
+			camera.CFrame = lastCam * effects:shakeOffset(dt)
+			return
+		end
+		local now = os.clock()
+		local zoomWanted = 1
+		if now < cine.untilT then
+			local t = 1 - (cine.untilT - now) / cine.len
+			zoomWanted = t < 0.7 and cine.zoom or 1
+		end
+		zoomNow += (zoomWanted - zoomNow) * (1 - math.exp(-(zoomWanted < zoomNow and 14 or 5) * dt))
+		overheadBlend += ((camMode == "Overhead" and 1 or 0) - overheadBlend) * (1 - math.exp(-OVERHEAD.Blend * dt))
+
 		local target = body.Position + Vector3.new(0, M.CameraHeight, 0)
 		focus = focus and focus:Lerp(target, 1 - math.exp(-22 * dt)) or target
 		local camPitch = math.clamp(M.CameraBasePitch - pitch * 0.8, M.CameraMinPitch, 1.1)
-		local wanted = (CFrame.new(focus) * CFrame.Angles(0, yaw, 0) * CFrame.Angles(-camPitch, 0, 0) * CFrame.new(0, 0, M.CameraDistance)).Position
-		local hit = Workspace:Raycast(focus, wanted - focus, cameraParams)
+		local beyEye = (CFrame.new(focus) * CFrame.Angles(0, yaw, 0) * CFrame.Angles(-camPitch, 0, 0) * CFrame.new(0, 0, M.CameraDistance * zoomNow)).Position
+		local hit = Workspace:Raycast(focus, beyEye - focus, cameraParams)
 		if hit then
-			wanted = hit.Position + (focus - hit.Position).Unit * 0.8
+			beyEye = hit.Position + (focus - hit.Position).Unit * 0.8
 		end
-		camera.CFrame = CFrame.lookAt(wanted, focus) * effects:shakeOffset(dt)
+		local eye, look = beyEye, focus
+		if overheadBlend > 0.001 then
+			local center = player:GetAttribute("ArenaCenter")
+			center = typeof(center) == "Vector3" and center or body.Position
+			local follow = OVERHEAD.Follow + (1 - zoomNow) * 1.4 -- a special pulls the view onto your bey
+			local lookAt = center:Lerp(body.Position, math.clamp(follow, 0, 1))
+			local flatBack = CFrame.Angles(0, overheadYaw, 0).LookVector * -1
+			local topEye = lookAt + Vector3.new(0, OVERHEAD.Height * zoomNow, 0) + flatBack * OVERHEAD.Back * zoomNow
+			eye = beyEye:Lerp(topEye, overheadBlend)
+			look = focus:Lerp(lookAt, overheadBlend)
+		end
+		lastCam = CFrame.lookAt(eye, look)
+		camera.FieldOfView = BASE_FOV + effects:fovOffset(dt)
+		camera.CFrame = lastCam * effects:shakeOffset(dt)
 	end)
 
 	-- Called by Main when the battle starts. Applied on the first unfrozen frame.
@@ -454,6 +515,34 @@ function Controller.start(ctx)
 
 	function Controller.isBound()
 		return body ~= nil and body.Parent ~= nil
+	end
+
+	-- A dash special was used: burst toward dir at speed on the next physics step.
+	function Controller.dash(speed, dir)
+		if body and MC.finite(speed) and typeof(dir) == "Vector3" and MC.finiteVector(dir) then
+			local flat = Vector3.new(dir.X, 0, dir.Z)
+			if flat.Magnitude > 0.01 then
+				pendingDash = { speed = math.clamp(speed, 0, 150), dir = flat.Unit }
+			end
+		end
+	end
+
+	-- Top-speed multiplier from the spirit passive / awakening (sent by the server).
+	function Controller.setSpeedMultiplier(m)
+		if MC.finite(m) then
+			speedMul = math.clamp(m, 0.5, 1.5)
+		end
+	end
+
+	-- Short zoom onto your bey (your special / awakening). zoom < 1 = closer.
+	function Controller.cinematic(duration, zoom)
+		cine.len = math.max(duration or 1, 0.1)
+		cine.untilT = os.clock() + cine.len
+		cine.zoom = math.clamp(zoom or 0.7, 0.3, 1)
+	end
+
+	function Controller.cameraMode()
+		return camMode
 	end
 
 	-- diagnostics (F6) ------------------------------------------------------------------------------------------
@@ -489,5 +578,11 @@ function Controller.isBound()
 end
 
 function Controller.launch() end
+function Controller.dash() end
+function Controller.setSpeedMultiplier() end
+function Controller.cinematic() end
+function Controller.cameraMode()
+	return "Bey"
+end
 
 return Controller

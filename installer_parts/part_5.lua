@@ -1065,4 +1065,4 @@ end
 
 return World
 ]=====])
-print('Spinforge installer part 5 of 8 done. Now run part 6.')
+print('Spinforge installer part 5 of 9 done. Now run part 6.')

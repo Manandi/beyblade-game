@@ -1046,4 +1046,4 @@ end
 
 return LaunchCore
 ]=====])
-print('Spinforge installer part 2 of 8 done. Now run part 3.')
+print('Spinforge installer part 2 of 9 done. Now run part 3.')

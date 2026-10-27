@@ -586,4 +586,4 @@ return {
 	driver_perpetualaxis_A = { Center = Vector3.new(0.0000, -0.9602, -0.0000), Size = Vector3.new(1.3913, 1.2204, 1.3913) },
 }
 ]=====])
-print('Spinforge installer part 1 of 8 done. Now run part 2.')
+print('Spinforge installer part 1 of 9 done. Now run part 2.')

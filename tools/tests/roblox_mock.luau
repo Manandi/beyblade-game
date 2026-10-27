@@ -462,6 +462,7 @@ function methods:Play()
 	end
 end
 function methods:Cancel() end
+function methods:Emit(n) Mock.emitted = (Mock.emitted or 0) + (n or 0) end
 
 instanceMeta.__index = function(i, k)
 	local m = methods[k]
@@ -576,7 +577,7 @@ function Mock.reset()
 	game.JobId = ""
 	game.PlaceId = 0
 	local services = {}
-	for _, n in ipairs({ "Workspace", "Players", "ReplicatedStorage", "ServerScriptService", "StarterPlayer", "RunService", "HttpService", "CollectionService", "DataStoreService", "TweenService", "UserInputService", "GuiService", "Lighting", "PhysicsService" }) do
+	for _, n in ipairs({ "Workspace", "Players", "ReplicatedStorage", "ServerScriptService", "StarterPlayer", "RunService", "HttpService", "CollectionService", "DataStoreService", "TweenService", "UserInputService", "GuiService", "Lighting", "PhysicsService", "Debris", "SoundService" }) do
 		services[n] = service(n == "Workspace" and "Workspace" or n, n)
 		services[n].Parent = game
 	end
@@ -599,6 +600,11 @@ function Mock.reset()
 		assert(a == "Default" or Mock.collision.groups[a], "unregistered collision group " .. a)
 		assert(b == "Default" or Mock.collision.groups[b], "unregistered collision group " .. b)
 		Mock.collision.pairs[a .. "|" .. b] = v
+	end
+	services.Debris.AddItem = function(_, inst, t)
+		task.delay(t or 10, function()
+			inst:Destroy()
+		end)
 	end
 	services.Lighting.EnvironmentSpecularScale = 0
 	services.Lighting.EnvironmentDiffuseScale = 0
