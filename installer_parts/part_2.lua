@@ -579,11 +579,11 @@ install('RS', '', 'ModuleScript', 'SpiritMeshData', [=====[
 -- Bounding-box Size of every spirit mesh in Roblox axes (Y up, the creature faces -Z). The game scales them to the
 -- height it wants, so only the proportions matter.
 return {
-	spirit_emberwolf = { Size = Vector3.new(0.5719, 1.0000, 2.2043), Tris = 5999 },
-	spirit_tidedrake = { Size = Vector3.new(0.6419, 1.2000, 1.0911), Tris = 5999 },
-	spirit_thornstag = { Size = Vector3.new(0.7323, 1.0000, 1.0304), Tris = 6000 },
-	spirit_stormroc = { Size = Vector3.new(1.6000, 0.8406, 0.6871), Tris = 5999 },
-	spirit_sunmane = { Size = Vector3.new(0.7237, 1.0000, 1.3857), Tris = 6000 },
+	spirit_emberwolf = { Size = Vector3.new(0.5907, 1.0000, 2.0309), Tris = 6000 },
+	spirit_tidedrake = { Size = Vector3.new(0.6395, 1.2000, 1.0814), Tris = 5999 },
+	spirit_thornstag = { Size = Vector3.new(0.8559, 1.0000, 0.9525), Tris = 6000 },
+	spirit_stormroc = { Size = Vector3.new(1.6000, 0.9613, 0.7134), Tris = 5998 },
+	spirit_sunmane = { Size = Vector3.new(0.8130, 1.0000, 1.3584), Tris = 5998 },
 }
 ]=====])
 install('RS', 'Core', 'ModuleScript', 'BattleCore', [=====[
