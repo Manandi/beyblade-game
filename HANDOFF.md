@@ -53,7 +53,7 @@ You sent two clips (a park stadium and "Bey Legacy") as the bar. Taken from them
   Lose). They're all empty, so the game is silent there. Paste Roblox-made sound ids from the Toolbox to switch them on.
 
 **Studio checklist for this update (after the main one below)**
-1. Install. Output: `Spinforge installed: 33 scripts`. The startup line also says `N of 5 spirit meshes`.
+1. Install. Output: `Spinforge installed: 34 scripts`. The startup line also says `N of 5 spirit meshes`.
 2. Fight Rook. When you hit, check for a flash, a ring, sparks, a tiny freeze and shake. Is it too much, or too little?
 3. Press **V** mid-fight, then V again. Can you still steer in overhead? Is the whole bowl in view?
 4. After ~3 s press **1**: the Ember Wolf should appear behind you and lunge, and you burst toward Rook.
@@ -69,9 +69,9 @@ You sent two clips (a park stadium and "Bey Legacy") as the bar. Taken from them
 ## Install (about 1 minute)
 
 1. Open your test place in Studio (not in Play mode).
-2. Paste `install_in_studio.lua` (291 KB) into the Command Bar and click Run.
+2. Paste `install_in_studio.lua` (292 KB) into the Command Bar and click Run.
    If that paste fails, run `installer_parts/part_1.lua` … `part_9.lua` instead, **in order**. Each one is under 40 KB.
-3. Output should say `Spinforge installed: 33 scripts. Press Play.`
+3. Output should say `Spinforge installed: 34 scripts. Press Play.`
 4. Optional, to test **saving**: the place must be published (File > Publish to Roblox, private is fine), then
    Game Settings > Security > **Enable Studio Access to API Services**. Without this the game runs and shows a
    "Progress is NOT being saved" banner; that's expected.
@@ -202,7 +202,7 @@ Actual run, 2026-10-27 (all passed; counts updated for this update):
 
 Note the result of each step (✓ / ✗ + a screenshot of anything red in Output).
 
-1. **Install** (Command Bar). Output: `Spinforge installed: 33 scripts.` Press Play.
+1. **Install** (Command Bar). Output: `Spinforge installed: 34 scripts.` Press Play.
 2. **Startup.** Output shows `Spinforge server ready: world built, N of 66 bey meshes available…` with no red text.
    You spawn on the blue pad in the hub. The arena is right beside it; the training bowl is further out (you are teleported to both).
 3. **Walk.** WASD moves your avatar and the camera follows. If you see "Backup controls on", note it: your
