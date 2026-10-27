@@ -149,6 +149,24 @@ the size Blender recorded (`BeyMeshData`), so the import scale doesn't matter. *
 the orientation; if parts come in rotated, fix the export axes in `build_beys.py` or rotate in `addMesh`. If the meshes are
 missing, the old block-built shapes are used. Check the previews in `assets/previews/` after changing the modelling.
 
+## Reference games (owner's clips, analysed 2026-10-27)
+
+The owner sent two Roblox clips as the quality bar. Copy the *ideas*, never their names, art, icons or part names (they use
+the anime's real part terms; we don't).
+
+- **Clip A (park stadium):** the avatar stays at the rim, over-the-shoulder camera looking into the bowl; the bey is small.
+  Octagonal stepped stone plinth with ramps, salmon bowl with dark ring/cross markings, dark angular bumpers, warm glowing
+  rim lights. Launch = a tall green light-pillar/tornado. White motion trails, sparks on every hit. Spectators gather.
+- **Clip B ("Bey Legacy"):** launch from the rim with a horizontal red→green "TIME YOUR LAUNCH" bar scored as a percentage
+  ("PERFECT! 91%"), best of 3 rounds (dots). Battle camera is **high and wide over the whole stadium**; the bey is tiny and
+  readable through trails and glow, not detail. Clean pale-blue bowl, thick gold rim, thin dark lines, bloom. HUD: two
+  special moves on keys 1/2 (named, shown as USED/READY), a stance toggle (G) and Recall (F), an Awakening meter that fills
+  in battle and fires a full-screen ultimate (a giant spirit beast, pink screen tint, big title text), a spin/stamina bar,
+  big "WINNER!" pop. Loadout screen: rarity-coloured cards per slot plus Spirit (passive %), Awakening and two Specials.
+- **Takeaways for us:** the drama comes from camera, VFX, sound and UI, not from bey detail. Proposed order: (1) wide
+  overhead battle camera; (2) trails, hit sparks, launch pillar, bloom; (3) stadium restyle; (4) launch bar shows a %
+  score and rounds become best-of-3; (5) two specials + Awakening meter/ultimate; (6) WINNER/LOSE pops and loadout cards.
+
 ## Milestones
 
 1. **Tilt, launch and slam feel** on one stadium. *(playtested; feel tuned twice)*
