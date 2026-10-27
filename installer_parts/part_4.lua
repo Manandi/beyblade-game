@@ -31,6 +31,688 @@ local function install(rootKey, path, class, name, source)
 	s.Source = source
 	s.Parent = parent
 end
+install('SSS', '', 'ModuleScript', 'BattleService', [=====[
+--!nonstrict
+-- BattleService: the player-vs-villain battle in the Arena. The SERVER owns spin, hits, outcomes and rewards.
+--   Challenge prompt -> (queue if the arena is busy) -> countdown (both beys frozen) -> active -> finished
+--   -> result screen (Rematch / Leave, or it closes itself) -> cleanup (beys removed, avatar restored)
+-- What the server trusts from the client: only the player's bey position/velocity (client-owned physics, which a
+-- cheater could fake), a bare "my slam landed" signal (checked against the fall the server observed), and the time
+-- the player pressed LAUNCH (checked against the meter's window; the server judges the timing itself), and
+-- "use special 1/2" / "awaken" requests (the server checks the loadout, cooldowns and meter; see SpecialsCore).
+-- Clients never send damage, results, XP or Shards. See HANDOFF.md "Residual exploit exposure".
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local HttpService = game:GetService("HttpService")
+local Workspace = game:GetService("Workspace")
+
+local Shared = ReplicatedStorage:WaitForChild("Spinforge")
+local GameConfig = require(Shared.GameConfig)
+local CombatCore = require(Shared.Core.CombatCore)
+local BattleCore = require(Shared.Core.BattleCore)
+local Progression = require(Shared.Core.Progression)
+local LaunchCore = require(Shared.Core.LaunchCore)
+local SpecialsCore = require(Shared.Core.SpecialsCore)
+local BeyConfig = require(Shared.BeyConfig)
+
+local BeyFactory = require(script.Parent.BeyFactory)
+local BeyService = require(script.Parent.BeyService)
+local DataService = require(script.Parent.DataService)
+local VillainAI = require(script.Parent.VillainAI)
+local World = require(script.Parent.World)
+
+local C, B, V, P, L, A = GameConfig.Combat, GameConfig.Battle, GameConfig.Villain, GameConfig.Progression, GameConfig.Launch, GameConfig.Specials
+local SNAPSHOT_EVERY = 0.2 -- seconds between specials/awakening HUD updates sent to the player
+
+local BattleService = {}
+
+local remotes
+local current = nil -- the one active battle record, or nil
+local queue = {} -- players waiting for the arena
+local requestLimiter = CombatCore.newRateLimiter(C.RequestsPerSecond)
+
+local function send(player, payload)
+	if player and player.Parent then
+		remotes.BattleEvent:FireClient(player, payload)
+	end
+end
+
+local function difficultyFor(player)
+	local data = DataService.get(player)
+	local wins = data and data.Record.Wins or 0
+	return wins >= V.HardAfterWins and "Hard" or V.Difficulty
+end
+
+function BattleService.inBattle(player)
+	return current ~= nil and current.player == player
+end
+
+local function setBattleAttrs(player, state, endsAt)
+	if player.Parent then
+		player:SetAttribute("BattleState", state)
+		player:SetAttribute("BattleEndsAt", endsAt or 0)
+	end
+end
+
+local function removeFromQueue(player)
+	for i = #queue, 1, -1 do
+		if queue[i] == player then
+			table.remove(queue, i)
+		end
+	end
+end
+
+local startBattle -- forward
+
+local function cleanup(rec, rematch)
+	if current ~= rec then
+		return
+	end
+	current = nil
+	if rec.ai then
+		rec.ai:destroy()
+	end
+	if rec.villain and rec.villain.model then
+		rec.villain.model:Destroy()
+	end
+	local player = rec.player
+	if player.Parent then
+		setBattleAttrs(player, "", 0)
+		send(player, { kind = "closed" })
+		if rematch and #queue == 0 then
+			BeyService.removeBey(player)
+			player:SetAttribute("Mode", "OnFoot") -- startBattle re-enters bey mode straight away
+			startBattle(player)
+			if current == nil or current.player ~= player then
+				BeyService.exit(player) -- the restart didn't happen: never leave the avatar frozen
+			end
+		elseif rematch then
+			-- Others are waiting: go to the back of the line instead of jumping it.
+			BeyService.exit(player)
+			table.insert(queue, player)
+		else
+			BeyService.exit(player)
+		end
+	end
+	-- Next in line.
+	while not current and #queue > 0 do
+		local nextPlayer = table.remove(queue, 1)
+		if nextPlayer.Parent and BeyService.mode(nextPlayer) == "OnFoot" then
+			startBattle(nextPlayer)
+		elseif nextPlayer.Parent then
+			remotes.Toast:FireClient(nextPlayer, "Your turn in the arena came up while you were practicing. Challenge again when you're ready.")
+		end
+	end
+	for i, p in ipairs(queue) do
+		send(p, { kind = "queued", position = i })
+	end
+end
+
+local function finishBattle(rec, result, now)
+	local player = rec.player
+	setBattleAttrs(player, "finished", 0)
+	local outcome = result.outcomes.player
+	local rewardText, levelUp = nil, nil
+	if BattleCore.claimRewards(rec.battle) and player.Parent then
+		local activeFor = now - (rec.startedAt or now)
+		local reward = Progression.battleReward(outcome, rec.difficulty, P, GameConfig.Difficulty)
+		-- No reward for quitting, and none for a loss that took almost no time (stops farming quick ring-outs).
+		if result.reason == "left" or (outcome == "loss" and activeFor < P.MinLossSecondsForReward) then
+			reward = { Outcome = outcome, XP = 0, Shards = 0 }
+		end
+		local data = DataService.get(player)
+		if data and reward then
+			local ok, info = Progression.grantBattleReward(data, rec.id, reward, P)
+			if ok then
+				DataService.markDirty(player)
+				rewardText = reward
+				if info.levelAfter > info.levelBefore then
+					levelUp = info.levelAfter
+				end
+				DataService.sendProfile(player)
+			end
+		end
+	end
+	if rec.ai then
+		rec.ai:setTelegraph(nil)
+	end
+	send(player, {
+		kind = "finished",
+		outcome = outcome,
+		reason = result.reason,
+		reward = rewardText,
+		levelUp = levelUp,
+		next = difficultyFor(player),
+		closesIn = B.ResultTimeout,
+	})
+end
+
+startBattle = function(player)
+	if not player.Parent or not DataService.isReady(player) then
+		return
+	end
+	if BeyService.mode(player) ~= "OnFoot" then
+		return
+	end
+	if current then
+		if not table.find(queue, player) then
+			table.insert(queue, player)
+		end
+		send(player, { kind = "queued", position = table.find(queue, player) })
+		return
+	end
+	local now = os.clock()
+	local center = World.ARENA_CENTER
+	local difficulty = difficultyFor(player)
+	local diff = GameConfig.Difficulty[difficulty]
+	local playerAt = CFrame.lookAt(center + Vector3.new(0, 5, B.StartRadius), center + Vector3.new(0, 5, 0))
+	local villainAt = CFrame.lookAt(center + Vector3.new(0, 5, -B.StartRadius), center + Vector3.new(0, 5, 0))
+
+	local mine = BeyService.enter(player, "Battle", playerAt, true, center)
+	if not mine then
+		return
+	end
+	local villain = BeyFactory.build({
+		name = "villain_" .. V.Id,
+		partIds = V.Parts,
+		level = V.Level,
+		cframe = villainAt,
+		parent = BeyService.folder(),
+	})
+	villain.body.Anchored = true
+	villain.model:SetAttribute("Villain", true)
+	villain.model:SetAttribute("DisplayName", V.Name)
+
+	local rec = {
+		id = HttpService:GenerateGUID(false),
+		player = player,
+		mine = mine,
+		villain = villain,
+		difficulty = difficulty,
+		diff = diff,
+		contacts = CombatCore.newContacts(),
+		villainFall = CombatCore.newFallTracker(),
+		outTimers = {},
+		startedAt = nil,
+		-- Skill launch: the meter runs on the shared server clock during the countdown.
+		meter = LaunchCore.newMeter(Workspace:GetServerTimeNow(), B.Countdown, Random.new():NextNumber(), L),
+		launch = {}, -- side -> { quality, label }
+		snapshotAt = 0,
+	}
+	local equipped = (DataService.get(player) or {}).Equipped or BeyConfig.StarterLoadout
+	rec.specials = {
+		player = SpecialsCore.newSide(equipped, BeyConfig.Items),
+		villain = SpecialsCore.newSide({ Spirit = V.Spirit, Special1 = V.Specials[1], Special2 = V.Specials[2] }, BeyConfig.Items),
+	}
+	rec.spirits = { player = equipped.Spirit, villain = V.Spirit }
+	rec.battle = BattleCore.new(rec.id, {
+		{ key = "player", maxSpin = mine.maxSpin, drain = CombatCore.drainPerSecond(mine.stats, C) },
+		{ key = "villain", maxSpin = villain.maxSpin, drain = CombatCore.drainPerSecond(villain.stats, C) },
+	}, B, now)
+	for key, side in pairs(rec.specials) do
+		BattleCore.setDrain(rec.battle, key, rec.battle.sides[key].drain * SpecialsCore.drain(side))
+	end
+	rec.ai = VillainAI.new(villain, diff, center, { BeyService.folder() })
+	-- The villain's launch is decided now (its skill depends on difficulty).
+	local vq = LaunchCore.villainQuality(diff.Launch or 0.7, Random.new():NextNumber())
+	rec.launch.villain = { quality = vq, label = vq >= 0.95 and "PERFECT" or vq >= L.Good and "GOOD" or "WEAK" }
+	BattleCore.setStartSpin(rec.battle, "villain", LaunchCore.effects(vq, L).spinFraction)
+	current = rec
+	removeFromQueue(player)
+	setBattleAttrs(player, "countdown", 0)
+	local m = rec.meter
+	send(player, {
+		kind = "countdown",
+		seconds = B.Countdown,
+		foe = V.Name,
+		difficulty = difficulty,
+		loadout = { spirit = equipped.Spirit, specials = { equipped.Special1, equipped.Special2 } },
+		foeLoadout = { spirit = V.Spirit, specials = V.Specials },
+		meter = { start = m.start, finish = m.finish, period = m.period, zoneCenter = m.zoneCenter, greenHalf = m.greenHalf, yellowHalf = m.yellowHalf },
+	})
+end
+
+-- Applies a contact hit between the two beys.
+local function resolveContact(rec, now)
+	local pb, vb = rec.mine.body, rec.villain.body
+	local pPos, vPos = pb.Position, vb.Position
+	local dist = (vPos - pPos).Magnitude
+	if not CombatCore.contactStep(rec.contacts, "player", "villain", dist, now, C) then
+		return
+	end
+	local pVel, vVel = pb.AssemblyLinearVelocity, vb.AssemblyLinearVelocity
+	local n, closing, share = CombatCore.contact(pPos, pVel, vPos, vVel)
+	if not n or closing <= C.MinImpactSpeed then
+		return
+	end
+	local sp, sv = rec.specials.player, rec.specials.villain
+	local pEmpowered = sp.empower ~= nil and now <= sp.empower.untilT
+	local vEmpowered = sv.empower ~= nil and now <= sv.empower.untilT
+	local pOut, pKbOut = SpecialsCore.outgoing(sp, now, A, true)
+	local vOut, vKbOut = SpecialsCore.outgoing(sv, now, A, true)
+	local pIn, pKbIn = SpecialsCore.incoming(sp, now, A)
+	local vIn, vKbIn = SpecialsCore.incoming(sv, now, A)
+	local dealt = CombatCore.hitDamage(rec.mine.stats, rec.villain.stats, closing, share, C) * pOut * vIn
+	local taken = CombatCore.hitDamage(rec.villain.stats, rec.mine.stats, closing, 1 - share, C) * rec.diff.Damage * vOut * pIn
+	dealt = BattleCore.damage(rec.battle, "villain", dealt)
+	taken = BattleCore.damage(rec.battle, "player", taken)
+	SpecialsCore.charge(sp, dealt * A.MeterPerDamageDealt + taken * A.MeterPerDamageTaken, A)
+	SpecialsCore.charge(sv, taken * A.MeterPerDamageDealt + dealt * A.MeterPerDamageTaken, A)
+	local kbVillain = math.min(CombatCore.knockback(rec.mine.stats, rec.villain.stats, closing, C) * pKbOut * vKbIn, C.MaxKnockback * 2)
+	local kbPlayer = math.min(CombatCore.knockback(rec.villain.stats, rec.mine.stats, closing, C) * vKbOut * pKbIn, C.MaxKnockback * 2)
+	vb.AssemblyLinearVelocity += (n + Vector3.new(0, 0.25, 0)).Unit * kbVillain
+	remotes.Knockback:FireClient(rec.player, (-n + Vector3.new(0, 0.25, 0)).Unit * kbPlayer)
+	rec.ai:onHit(now)
+	local strength = math.clamp(closing / 60, 0.2, 1)
+	if pEmpowered or vEmpowered then
+		strength = 1
+	end
+	send(rec.player, {
+		kind = "hit",
+		dealt = dealt,
+		taken = taken,
+		at = (pPos + vPos) / 2,
+		normal = n,
+		strength = strength,
+		crit = pEmpowered or nil,
+		foeCrit = vEmpowered or nil,
+	})
+end
+
+-- The player's slam landed (already validated by BeyService against the observed fall).
+local function playerSlam(rec, fall, now)
+	local pPos, vPos = rec.mine.body.Position, rec.villain.body.Position
+	local d = Vector3.new(vPos.X - pPos.X, 0, vPos.Z - pPos.Z)
+	local pOut = SpecialsCore.outgoing(rec.specials.player, now, A, false)
+	local vIn = SpecialsCore.incoming(rec.specials.villain, now, A)
+	local dmg = CombatCore.slamDamage(rec.mine.stats, rec.villain.stats, fall, d.Magnitude, C) * pOut * vIn
+	local recoil = BattleCore.damage(rec.battle, "player", CombatCore.slamRecoil(rec.mine.stats, C))
+	local dealt = 0
+	if dmg > 0 then
+		dealt = BattleCore.damage(rec.battle, "villain", dmg)
+		SpecialsCore.charge(rec.specials.player, dealt * A.MeterPerDamageDealt, A)
+		local dir = (d.Magnitude > 0.01 and d.Unit or Vector3.new(0, 0, -1)) + Vector3.new(0, 0.6, 0)
+		rec.villain.body.AssemblyLinearVelocity += dir.Unit * C.SlamKnockback
+		rec.ai:onHit(now)
+	end
+	send(rec.player, { kind = "slam", hit = dmg > 0, dealt = dealt, recoil = recoil })
+end
+
+local function villainSlam(rec, fallSeen, now)
+	if rec.battle.state ~= "active" then
+		return
+	end
+	local fall = math.max(fallSeen, CombatCore.maxFall(rec.villainFall, now, C.SlamFallWindow))
+	local pPos, vPos = rec.mine.body.Position, rec.villain.body.Position
+	local d = Vector3.new(pPos.X - vPos.X, 0, pPos.Z - vPos.Z)
+	local vOut = SpecialsCore.outgoing(rec.specials.villain, now, A, false)
+	local pIn = SpecialsCore.incoming(rec.specials.player, now, A)
+	local dmg = CombatCore.slamDamage(rec.villain.stats, rec.mine.stats, fall, d.Magnitude, C) * rec.diff.Damage * vOut * pIn
+	if dmg > 0 then
+		local taken = BattleCore.damage(rec.battle, "player", dmg)
+		SpecialsCore.charge(rec.specials.player, taken * A.MeterPerDamageTaken, A)
+		SpecialsCore.charge(rec.specials.villain, taken * A.MeterPerDamageDealt, A)
+		local dir = (d.Magnitude > 0.01 and d.Unit or Vector3.new(0, 0, 1)) + Vector3.new(0, 0.6, 0)
+		remotes.Knockback:FireClient(rec.player, dir.Unit * C.SlamKnockback)
+		send(rec.player, { kind = "hit", dealt = 0, taken = taken, at = pPos, strength = 1, slam = true })
+	end
+	send(rec.player, { kind = "villainSlam", at = vPos })
+end
+
+-- Uses special `index` for `who` ("player" | "villain"). The server applies everything except the player's own dash
+-- burst, which the player's client applies to its bey (client-owned physics). Returns true if it was used.
+local function useSpecial(rec, who, index, now)
+	local b = rec.battle
+	if b.state ~= "active" then
+		return false
+	end
+	local side = rec.specials[who]
+	local def = SpecialsCore.use(side, index, now)
+	if not def then
+		return false
+	end
+	local foeKey = who == "player" and "villain" or "player"
+	local selfBody = who == "player" and rec.mine.body or rec.villain.body
+	local foeBody = who == "player" and rec.villain.body or rec.mine.body
+	local t = def.Tuning
+	local toFoe = Vector3.new(foeBody.Position.X - selfBody.Position.X, 0, foeBody.Position.Z - selfBody.Position.Z)
+	local dir = toFoe.Magnitude > 0.1 and toFoe.Unit or Vector3.new(0, 0, -1)
+	local ev = { kind = "special", who = who, id = def.Id, special = def.Kind, spirit = rec.spirits[who], at = selfBody.Position, dir = dir }
+	if def.Kind == "dash" then
+		ev.dash = t.DashSpeed
+		if who == "villain" then
+			selfBody.AssemblyLinearVelocity = Vector3.new(dir.X * t.DashSpeed, selfBody.AssemblyLinearVelocity.Y, dir.Z * t.DashSpeed)
+		end
+	end
+	if (def.Kind == "heal" or def.Kind == "guard") and t.Heal then
+		ev.healed = BattleCore.heal(b, who, b.sides[who].maxSpin * t.Heal)
+	end
+	if def.Kind == "quake" then
+		local dist = toFoe.Magnitude
+		if dist <= t.Radius then
+			local out = SpecialsCore.outgoing(side, now, A, false)
+			local inc, kbIn = SpecialsCore.incoming(rec.specials[foeKey], now, A)
+			local falloff = 1 - 0.4 * (dist / t.Radius)
+			local dmg = t.Damage * falloff * out * inc * (who == "villain" and rec.diff.Damage or 1)
+			local applied = BattleCore.damage(b, foeKey, dmg)
+			ev.hit, ev.dealt = true, applied
+			SpecialsCore.charge(side, applied * A.MeterPerDamageDealt, A)
+			SpecialsCore.charge(rec.specials[foeKey], applied * A.MeterPerDamageTaken, A)
+			local push = (dir + Vector3.new(0, 0.5, 0)).Unit * t.Knockback * kbIn
+			if foeKey == "villain" then
+				rec.villain.body.AssemblyLinearVelocity += push
+				rec.ai:onHit(now)
+			else
+				remotes.Knockback:FireClient(rec.player, push)
+			end
+		end
+	end
+	send(rec.player, ev)
+	return true
+end
+
+local function awaken(rec, who, now)
+	if rec.battle.state ~= "active" or not SpecialsCore.awaken(rec.specials[who], now, A) then
+		return false
+	end
+	local body = who == "player" and rec.mine.body or rec.villain.body
+	send(rec.player, { kind = "awaken", who = who, spirit = rec.spirits[who], at = body.Position, duration = A.AwakenDuration })
+	return true
+end
+
+local function sendSnapshot(rec, now)
+	if now - rec.snapshotAt < SNAPSHOT_EVERY then
+		return
+	end
+	rec.snapshotAt = now
+	local you = SpecialsCore.snapshot(rec.specials.player, now, A)
+	you.speed = SpecialsCore.speed(rec.specials.player, now, A)
+	send(rec.player, { kind = "specials", you = you, foe = SpecialsCore.snapshot(rec.specials.villain, now, A) })
+end
+
+local function step(dt)
+	local rec = current
+	if not rec then
+		return
+	end
+	local now = os.clock()
+	local player = rec.player
+	-- Interrupted: player gone, bey removed, or the villain model destroyed by something else.
+	if not player.Parent or not rec.mine.body.Parent or not rec.villain.body.Parent then
+		BattleCore.leave(rec.battle, "player", now)
+		cleanup(rec, false)
+		return
+	end
+
+	-- Countdown over and the player never pressed LAUNCH: a weak launch.
+	if rec.battle.state == "countdown" and now - rec.battle.stateAt >= B.Countdown and not rec.launch.player then
+		rec.launch.player = { quality = L.NoPress, label = "TOO LATE" }
+		BattleCore.setStartSpin(rec.battle, "player", LaunchCore.effects(L.NoPress, L).spinFraction)
+	end
+
+	local events = BattleCore.update(rec.battle, now, dt)
+	for _, ev in ipairs(events) do
+		if ev.kind == "started" then
+			rec.startedAt = now
+			BeyService.release(player)
+			rec.villain.body.Anchored = false
+			rec.villain.body:SetNetworkOwner(nil)
+			-- LET IT RIP: the villain launches toward the player; the player's client launches its own bey.
+			local pl = rec.launch.player or { quality = L.NoPress, label = "TOO LATE" }
+			local vl = rec.launch.villain
+			local ve = LaunchCore.effects(vl.quality, L)
+			local toPlayer = rec.mine.body.Position - rec.villain.body.Position
+			toPlayer = Vector3.new(toPlayer.X, 0, toPlayer.Z)
+			if toPlayer.Magnitude > 0.1 then
+				rec.villain.body.AssemblyLinearVelocity = toPlayer.Unit * ve.speed
+			end
+			rec.ai:launched(ve.boost, now)
+			SpecialsCore.start(rec.specials.player, now, A)
+			SpecialsCore.start(rec.specials.villain, now, A)
+			local pe = LaunchCore.effects(pl.quality, L)
+			setBattleAttrs(player, "active", Workspace:GetServerTimeNow() + B.Duration)
+			send(player, {
+				kind = "started",
+				duration = B.Duration,
+				launch = { quality = pl.quality, label = pl.label, speed = pe.speed, boost = pe.boost, spin = pe.spinFraction },
+				foeLaunch = vl.label,
+			})
+		elseif ev.kind == "finished" then
+			finishBattle(rec, ev.result, now)
+		elseif ev.kind == "cleanup" then
+			cleanup(rec, false)
+			return
+		end
+	end
+
+	local b = rec.battle
+	if b.state == "active" then
+		CombatCore.recordFall(rec.villainFall, rec.villain.body.AssemblyLinearVelocity.Y, now, C.SlamFallWindow)
+		-- ring-outs (relative to the arena centre)
+		local center = World.ARENA_CENTER
+		if CombatCore.ringOutStep(rec.outTimers, "player", rec.mine.body.Position - center, now, B) then
+			BattleCore.ringOut(b, "player")
+		end
+		if CombatCore.ringOutStep(rec.outTimers, "villain", rec.villain.body.Position - center, now, B) then
+			BattleCore.ringOut(b, "villain")
+		end
+		SpecialsCore.tick(rec.specials.player, dt, A)
+		SpecialsCore.tick(rec.specials.villain, dt, A)
+		resolveContact(rec, now)
+		local mine = rec.mine.body
+		rec.ai.speedMul = SpecialsCore.speed(rec.specials.villain, now, A)
+		rec.ai:step(dt, now, { pos = mine.Position, vel = mine.AssemblyLinearVelocity }, BattleCore.fraction(b, "villain"), function(fall)
+			villainSlam(rec, fall, now)
+		end)
+		-- the villain's specials and awakening
+		local choice = rec.ai:chooseSpecial(now, {
+			specials = rec.specials.villain,
+			foe = rec.specials.player,
+			canAwaken = SpecialsCore.canAwaken(rec.specials.villain, A),
+			spin = BattleCore.fraction(b, "villain"),
+		})
+		if choice == "awaken" then
+			awaken(rec, "villain", now)
+		elseif choice then
+			useSpecial(rec, "villain", choice, now)
+		end
+		sendSnapshot(rec, now)
+		-- a knockout this frame is resolved on the next update()
+	elseif rec.ai then
+		rec.ai:idle(dt)
+	end
+
+	-- spin for the HUD (attributes replicate) and the cosmetic hub speed
+	for key, beyRec in pairs({ player = rec.mine, villain = rec.villain }) do
+		local side = b.sides[key]
+		if beyRec.body.Parent then
+			beyRec.body:SetAttribute("Spin", side.spin)
+			beyRec.body:SetAttribute("MaxSpin", side.maxSpin)
+			beyRec.hinge.AngularVelocity = CombatCore.visualSpin(side.spin / side.maxSpin, C)
+		end
+	end
+end
+
+function BattleService.onSlam(player)
+	local rec = current
+	if not rec or rec.player ~= player or rec.battle.state ~= "active" then
+		return
+	end
+	local fall = BeyService.validateSlam(player)
+	if fall then
+		playerSlam(rec, fall, os.clock())
+	end
+end
+
+-- Player reset / respawned / was interrupted while in bey mode.
+function BattleService.onInterrupted(player)
+	local rec = current
+	if rec and rec.player == player then
+		local ev = BattleCore.leave(rec.battle, "player", os.clock())
+		if ev then
+			finishBattle(rec, ev.result, os.clock())
+		end
+		cleanup(rec, false)
+	else
+		BeyService.exit(player)
+	end
+end
+
+function BattleService.start(r)
+	remotes = r
+	RunService.Heartbeat:Connect(step)
+
+	remotes.Request.OnServerEvent:Connect(function(player, req)
+		if type(req) ~= "table" or type(req.action) ~= "string" then
+			return
+		end
+		if not CombatCore.allow(requestLimiter, player, os.clock()) then
+			return
+		end
+		local rec = current
+		local mine = rec and rec.player == player
+		if req.action == "launch" and mine and rec.battle.state == "countdown" and not rec.launch.player then
+			-- One press per battle. The server judges where the needle was at the stamped time.
+			local t = LaunchCore.acceptPress(rec.meter, req.t, Workspace:GetServerTimeNow(), L)
+			local q, label = L.Miss, "WEAK"
+			if t then
+				q, label = LaunchCore.quality(rec.meter, LaunchCore.needle(rec.meter, t), L)
+			end
+			rec.launch.player = { quality = q, label = label }
+			BattleCore.setStartSpin(rec.battle, "player", LaunchCore.effects(q, L).spinFraction)
+			send(player, { kind = "launchLocked", label = label, quality = q })
+		elseif req.action == "special" and mine and (req.index == 1 or req.index == 2) then
+			if not useSpecial(rec, "player", req.index, os.clock()) then
+				send(player, { kind = "specialRefused", index = req.index })
+			end
+		elseif req.action == "awaken" and mine then
+			awaken(rec, "player", os.clock())
+		elseif req.action == "rematch" and mine and rec.battle.state == "finished" then
+			BattleCore.requestCleanup(rec.battle, os.clock())
+			cleanup(rec, true)
+		elseif req.action == "leave" and mine and rec.battle.state == "finished" then
+			BattleCore.requestCleanup(rec.battle, os.clock())
+			cleanup(rec, false)
+		elseif req.action == "forfeit" and mine and (rec.battle.state == "active" or rec.battle.state == "countdown") then
+			local ev = BattleCore.leave(rec.battle, "player", os.clock())
+			if ev then
+				finishBattle(rec, ev.result, os.clock())
+			end
+		elseif req.action == "leaveQueue" then
+			removeFromQueue(player)
+			send(player, { kind = "closed" })
+		end
+	end)
+
+	Players.PlayerRemoving:Connect(function(player)
+		removeFromQueue(player)
+		CombatCore.forget(requestLimiter, player)
+		local rec = current
+		if rec and rec.player == player then
+			BattleCore.leave(rec.battle, "player", os.clock())
+			cleanup(rec, false)
+		end
+	end)
+end
+
+BattleService.challenge = function(player)
+	startBattle(player)
+end
+
+return BattleService
+]=====])
+install('SSS', '', 'ModuleScript', 'BeyFactory', [=====[
+--!nonstrict
+-- BeyFactory: builds one bey model, used for both player and villain beys.
+--   Body   invisible 4-stud ball that does the physics (the collider)
+--   Align  AlignOrientation that stops the ball rolling and sets the bey's lean (client for players, server for NPCs)
+--   Top    small hub, hinge-motored so it spins; BeyVisuals welds the designed parts to it
+-- Attributes on Body: Attack, Defense, Stamina, Balance, Level, Spin, MaxSpin (Spin is set by the battle service).
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Shared = ReplicatedStorage:WaitForChild("Spinforge")
+local BeyConfig = require(Shared.BeyConfig)
+local BeyVisuals = require(Shared.BeyVisuals)
+local GameConfig = require(Shared.GameConfig)
+local CombatCore = require(Shared.Core.CombatCore)
+
+local BeyFactory = {}
+
+-- opts: { name, partIds, level, cframe, parent }
+-- Returns { model, body, top, hinge, align, stats, maxSpin }
+function BeyFactory.build(opts)
+	local stats = BeyConfig.ComputeStats(opts.partIds, opts.level)
+	local maxSpin = CombatCore.maxSpin(stats, GameConfig.Combat)
+
+	local model = Instance.new("Model")
+	model.Name = opts.name
+	model.Parent = opts.parent -- parented first so the welds capture the layout
+
+	local body = Instance.new("Part")
+	body.Name = "Body"
+	body.Shape = Enum.PartType.Ball
+	body.Size = Vector3.new(4, 4, 4)
+	body.Transparency = 1
+	body.CustomPhysicalProperties = PhysicalProperties.new(1, 0.1, 0.1, 1, 1)
+	body.CFrame = opts.cframe
+	body.Parent = model
+	model.PrimaryPart = body
+	for _, stat in ipairs(BeyConfig.StatNames) do
+		body:SetAttribute(stat, stats[stat])
+	end
+	body:SetAttribute("Level", opts.level)
+	body:SetAttribute("MaxSpin", maxSpin)
+	body:SetAttribute("Spin", maxSpin)
+
+	local center = Instance.new("Attachment")
+	center.Name = "Center"
+	center.Parent = body
+	local align = Instance.new("AlignOrientation")
+	align.Name = "Align"
+	align.Mode = Enum.OrientationAlignmentMode.OneAttachment
+	align.Attachment0 = center
+	align.RigidityEnabled = true
+	align.CFrame = opts.cframe.Rotation
+	align.Parent = model
+
+	local top = Instance.new("Part")
+	top.Name = "Top"
+	top.Shape = Enum.PartType.Cylinder
+	top.Size = Vector3.new(0.8, 1.2, 1.2)
+	top.Color = BeyConfig.RarityColors[BeyConfig.Parts[opts.partIds.Layer].Rarity]
+	top.Material = Enum.Material.Metal
+	top.CanCollide = false
+	top.CanQuery = false
+	top.CanTouch = false
+	top.CustomPhysicalProperties = PhysicalProperties.new(0.01, 0.1, 0.1, 1, 1)
+	top.CFrame = body.CFrame * CFrame.Angles(0, 0, math.rad(90))
+	top.Parent = model
+	local topAxis = Instance.new("Attachment")
+	topAxis.Name = "Axis"
+	topAxis.Parent = top
+	local bodyAxis = Instance.new("Attachment")
+	bodyAxis.Name = "Axis"
+	bodyAxis.CFrame = CFrame.Angles(0, 0, math.rad(90))
+	bodyAxis.Parent = body
+	local hinge = Instance.new("HingeConstraint")
+	hinge.Name = "Spin"
+	hinge.Attachment0 = bodyAxis
+	hinge.Attachment1 = topAxis
+	hinge.ActuatorType = Enum.ActuatorType.Motor
+	hinge.MotorMaxTorque = 50000
+	hinge.AngularVelocity = GameConfig.Combat.VisualSpinMax
+	hinge.Parent = model
+
+	BeyVisuals.Attach(top, body.CFrame, opts.partIds, model)
+
+	return { model = model, body = body, top = top, hinge = hinge, align = align, stats = stats, maxSpin = maxSpin }
+end
+
+return BeyFactory
+]=====])
 install('SSS', '', 'ModuleScript', 'BeyService', [=====[
 --!nonstrict
 -- BeyService: puts a player into "bey mode" and back out, safely, whatever happens.
@@ -315,720 +997,4 @@ end
 
 return BeyService
 ]=====])
-install('SSS', '', 'ModuleScript', 'DataService', [=====[
---!nonstrict
--- DataService: loads, holds and saves each player's data using SessionStore (session locks, retries, never
--- overwriting a real save after a failed load) over Roblox DataStores.
---
--- Save status per player (shown to them):
---   "saving"   loaded normally; autosaves and saves on leave
---   "nosave"   could not load (DataStore error, or Studio without API access): plays with a temporary profile that is
---              NEVER written, so the real save stays safe. Shown as a banner.
---   "locked"   another server still holds this player's session: temporary profile, not saved
---   "newer"    the save came from a newer game version: temporary profile, not saved
--- Live DataStore behaviour is unverified here; the rules are tested against a mock (tools/tests/progression.test.luau).
-
-local DataStoreService = game:GetService("DataStoreService")
-local Players = game:GetService("Players")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local RunService = game:GetService("RunService")
-
-local Shared = ReplicatedStorage:WaitForChild("Spinforge")
-local BeyConfig = require(Shared.BeyConfig)
-local GameConfig = require(Shared.GameConfig)
-local PlayerData = require(Shared.Core.PlayerData)
-local Progression = require(Shared.Core.Progression)
-local SessionStore = require(Shared.Core.SessionStore)
-
-local DataService = {}
-
-local G = GameConfig.Data
-local P = GameConfig.Progression
-local profiles = {} -- player -> { data, status, dirty }
-local remotes
-local onReady = {} -- callbacks(player)
--- Studio has no JobId. Use one fixed id there, so a lock left behind by a stopped test session is picked straight
--- back up by the next one instead of locking you out of saving for LockTimeout.
-local jobId = (game.JobId ~= "" and game.JobId) or "studio"
-
--- Adapter: SessionStore's store:update contract over a DataStore.
-local function makeAdapter(ds)
-	return {
-		update = function(_, key, transform)
-			local cancelled = false
-			local ok, result = pcall(function()
-				return ds:UpdateAsync(key, function(old)
-					local new = transform(old)
-					cancelled = new == nil
-					return new
-				end)
-			end)
-			if not ok then
-				return false, result
-			end
-			if cancelled then
-				return true, nil
-			end
-			return true, result
-		end,
-	}
-end
-
-local store
-local storeError
-
-local function keyFor(player)
-	return "u_" .. player.UserId
-end
-
-local function migrate(raw)
-	return PlayerData.migrate(raw, BeyConfig.StarterBey, BeyConfig.Parts, P.RecentBattleMemory)
-end
-
-local function sessionOpts()
-	return {
-		attempts = G.LoadAttempts,
-		retryWait = G.RetryWait,
-		wait = function(s)
-			task.wait(s)
-		end,
-		now = function()
-			return os.time()
-		end,
-		lockTimeout = G.LockTimeout,
-		migrate = migrate,
-	}
-end
-
-function DataService.levelOf(player)
-	local p = profiles[player]
-	return p and Progression.levelFromXP(p.data.XP, P) or 1
-end
-
-function DataService.get(player)
-	local p = profiles[player]
-	return p and p.data or nil
-end
-
-function DataService.status(player)
-	local p = profiles[player]
-	return p and p.status or "loading"
-end
-
-function DataService.isReady(player)
-	return profiles[player] ~= nil
-end
-
--- What the client sees: PlayerData.snapshot plus XP needed for this and the next level (for the XP bar).
-function DataService.snapshot(player)
-	local p = profiles[player]
-	if not p then
-		return nil
-	end
-	local level = DataService.levelOf(player)
-	local snap = PlayerData.snapshot(p.data, level, p.status)
-	snap.XPThis = Progression.xpForLevel(level, P)
-	snap.XPNext = level < P.MaxLevel and Progression.xpForLevel(level + 1, P) or snap.XPThis
-	return snap
-end
-
-function DataService.sendProfile(player)
-	if remotes and player.Parent and profiles[player] then
-		remotes.Profile:FireClient(player, DataService.snapshot(player))
-	end
-end
-
-function DataService.markDirty(player)
-	local p = profiles[player]
-	if p then
-		p.dirty = true
-	end
-end
-
-local function save(player, release)
-	local p = profiles[player]
-	if not p or p.status ~= "saving" or not store then
-		return "skipped"
-	end
-	local result, detail = SessionStore.save(store, keyFor(player), jobId, p.data, sessionOpts(), release)
-	if result == "ok" then
-		p.dirty = false
-	elseif result == "lost_lock" then
-		-- Another server took over this player's data: stop writing from here so we can't clobber it.
-		p.status = "locked"
-		warn(("Spinforge: %s's session moved to another server; this server stopped saving it."):format(player.Name))
-		DataService.sendProfile(player)
-	else
-		warn(("Spinforge: saving %s failed (%s). Will retry at the next autosave."):format(player.Name, tostring(detail)))
-	end
-	return result
-end
-DataService.save = save
-
-function DataService.onReady(callback)
-	table.insert(onReady, callback)
-end
-
-local function load(player)
-	local status, data, detail = "nosave", nil, storeError
-	if store then
-		local result
-		result, data, detail = SessionStore.load(store, keyFor(player), jobId, sessionOpts())
-		if result == "ok" then
-			status = "saving"
-		elseif result == "unsupported" then
-			status = "newer"
-		elseif result == "locked" then
-			status = "locked"
-		else
-			status = "nosave"
-		end
-	end
-	if not player.Parent then
-		-- Left while loading: release the lock we may have just taken.
-		if status == "saving" and data then
-			profiles[player] = { data = data, status = status, dirty = false }
-			save(player, true)
-			profiles[player] = nil
-		end
-		return
-	end
-	if status ~= "saving" then
-		warn(("Spinforge: %s plays with a temporary profile (%s: %s). It will NOT be saved."):format(player.Name, status, tostring(detail)))
-		data = PlayerData.new(BeyConfig.StarterBey)
-	end
-	profiles[player] = { data = data, status = status, dirty = false }
-	player:SetAttribute("DataReady", true)
-	DataService.sendProfile(player)
-	for _, cb in ipairs(onReady) do
-		task.spawn(cb, player)
-	end
-end
-
-function DataService.start(r)
-	remotes = r
-	local ok, result = pcall(function()
-		return DataStoreService:GetDataStore(G.StoreName)
-	end)
-	if ok then
-		store = makeAdapter(result)
-	else
-		storeError = tostring(result)
-		warn("Spinforge: DataStores unavailable (" .. storeError .. "). Progress will not save this session." .. (RunService:IsStudio() and " In Studio: Game Settings > Security > Enable Studio Access to API Services." or ""))
-	end
-
-	Players.PlayerAdded:Connect(function(player)
-		load(player)
-	end)
-	for _, player in ipairs(Players:GetPlayers()) do
-		task.spawn(load, player)
-	end
-
-	Players.PlayerRemoving:Connect(function(player)
-		if profiles[player] then
-			save(player, true)
-			profiles[player] = nil
-		end
-	end)
-
-	task.spawn(function()
-		while true do
-			task.wait(G.AutosaveInterval)
-			for player, p in pairs(profiles) do
-				if p.dirty and p.status == "saving" then
-					task.spawn(save, player, false)
-				end
-			end
-		end
-	end)
-
-	game:BindToClose(function()
-		local pending = 0
-		for player in pairs(profiles) do
-			pending += 1
-			task.spawn(function()
-				save(player, true)
-				pending -= 1
-			end)
-		end
-		local deadline = os.clock() + 25
-		while pending > 0 and os.clock() < deadline do
-			task.wait(0.2)
-		end
-	end)
-end
-
-return DataService
-]=====])
-install('SSS', '', 'Script', 'Main', [=====[
---!nonstrict
--- Spinforge server entry point. Starts everything in a fixed order and prints a startup report to Output.
--- If something required is missing, it stops with a message saying what to do instead of failing silently.
-
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local Workspace = game:GetService("Workspace")
-
-local REQUIRED_SHARED = { "BeyConfig", "BeyDesigns", "BeyMeshData", "BeyVisuals", "GameConfig", "Net", "Core" }
-local Shared = ReplicatedStorage:FindFirstChild("Spinforge")
-if not Shared then
-	error("Spinforge: ReplicatedStorage.Spinforge is missing. Run install_in_studio.lua again (Command Bar).")
-end
-local missing = {}
-for _, name in ipairs(REQUIRED_SHARED) do
-	if not Shared:FindFirstChild(name) then
-		table.insert(missing, name)
-	end
-end
-if #missing > 0 then
-	error("Spinforge: missing shared modules: " .. table.concat(missing, ", ") .. ". Run install_in_studio.lua again.")
-end
-
-local BeyConfig = require(Shared.BeyConfig)
-local GameConfig = require(Shared.GameConfig)
-local Net = require(Shared.Net)
-local Progression = require(Shared.Core.Progression)
-
-local World = require(script.Parent.World)
-local MeshImport = require(script.Parent.MeshImport)
-local DataService = require(script.Parent.DataService)
-local BeyService = require(script.Parent.BeyService)
-local BattleService = require(script.Parent.BattleService)
-
-Workspace.Gravity = BeyConfig.Movement.Gravity
-local remotes = Net.setup(ReplicatedStorage)
-World.removeLegacy()
-local world = World.build(GameConfig.Villain.Name)
-World.polishLighting()
-local meshes, moved = MeshImport.collect()
-
-DataService.start(remotes)
-BeyService.start(remotes, DataService, BattleService.onSlam)
-BeyService.onInterrupted = BattleService.onInterrupted
-BattleService.start(remotes)
-
--- Hub prompts.
-local function onFootAndReady(player)
-	return BeyService.mode(player) == "OnFoot" and DataService.isReady(player)
-end
-if world.prompts.challenge then
-	world.prompts.challenge.Triggered:Connect(function(player)
-		if onFootAndReady(player) then
-			BattleService.challenge(player)
-		end
-	end)
-end
-if world.prompts.practice then
-	world.prompts.practice.Triggered:Connect(function(player)
-		if onFootAndReady(player) then
-			BeyService.startPractice(player)
-		end
-	end)
-end
-if world.prompts.workshop then
-	world.prompts.workshop.Triggered:Connect(function(player)
-		remotes.BattleEvent:FireClient(player, { kind = "openWorkshop" })
-	end)
-end
-
--- Workshop: buy and equip, validated on the server. Changing parts is only allowed on foot.
-remotes.Workshop.OnServerInvoke = function(player, req)
-	local data = DataService.get(player)
-	local function reply(ok, reason)
-		return {
-			ok = ok,
-			reason = reason and (Progression.ReasonText[reason] or reason) or nil,
-			profile = DataService.snapshot(player),
-		}
-	end
-	if not data then
-		return reply(false, "Your profile is still loading.")
-	end
-	if type(req) ~= "table" or type(req.action) ~= "string" or type(req.part) ~= "string" then
-		return reply(false, "invalid")
-	end
-	local mode = BeyService.mode(player)
-	if mode == "Practice" then
-		return reply(false, "Leave practice to change parts.")
-	end
-	local inBattle = mode ~= "OnFoot"
-	local ok, reason
-	if req.action == "buy" then
-		ok, reason = Progression.buy(data, req.part, BeyConfig.Parts, GameConfig.Progression, inBattle)
-	elseif req.action == "equip" then
-		ok, reason = Progression.equip(data, req.part, BeyConfig.Parts, inBattle)
-	else
-		return reply(false, "invalid")
-	end
-	if ok then
-		DataService.markDirty(player)
-		DataService.sendProfile(player)
-		return reply(true, nil)
-	end
-	return reply(false, reason)
-end
-
--- Other requests: settings, tutorial, leaving practice. (Battle requests are handled in BattleService.)
-local SETTINGS = { CameraShake = true, ReducedEffects = true }
-remotes.Request.OnServerEvent:Connect(function(player, req)
-	if type(req) ~= "table" or type(req.action) ~= "string" then
-		return
-	end
-	local data = DataService.get(player)
-	if req.action == "setting" and data and SETTINGS[req.key] and type(req.value) == "boolean" then
-		data.Settings[req.key] = req.value
-		DataService.markDirty(player)
-		DataService.sendProfile(player)
-	elseif req.action == "tutorialDone" and data and not data.Settings.TutorialDone then
-		data.Settings.TutorialDone = true
-		DataService.markDirty(player)
-		DataService.sendProfile(player)
-	elseif req.action == "tutorialReset" and data then
-		data.Settings.TutorialDone = false
-		DataService.markDirty(player)
-		DataService.sendProfile(player)
-	elseif req.action == "exitPractice" and BeyService.mode(player) == "Practice" then
-		BeyService.exit(player)
-	end
-end)
-
-print(("Spinforge server ready: world %s, %d of %d bey meshes available%s, crates disabled (paid purchases off)."):format(
-	world.built and "built" or "found (custom SpinforgeWorld)",
-	meshes,
-	66,
-	moved > 0 and (" (moved " .. moved .. " imported model(s) from Workspace)") or ""
-))
-]=====])
-install('SSS', '', 'ModuleScript', 'MeshImport', [=====[
---!nonstrict
--- MeshImport: Studio's 3D importer drops imported models into Workspace. At server start, any bey meshes found
--- there (MeshParts named like "<partId>_P" / "<partId>_A") are moved into ReplicatedStorage.BeyMeshes, where
--- BeyVisuals looks for them. Returns how many meshes are available afterwards.
-
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local Workspace = game:GetService("Workspace")
-
-local Shared = ReplicatedStorage:WaitForChild("Spinforge")
-local BeyMeshData = require(Shared.BeyMeshData)
-
-local MeshImport = {}
-
-function MeshImport.collect()
-	local folder = ReplicatedStorage:FindFirstChild("BeyMeshes")
-	if not folder then
-		folder = Instance.new("Folder")
-		folder.Name = "BeyMeshes"
-		folder.Parent = ReplicatedStorage
-	end
-	local tops = {}
-	for _, d in ipairs(Workspace:GetDescendants()) do
-		if d:IsA("MeshPart") and BeyMeshData[d.Name] then
-			local top = d
-			while top.Parent and top.Parent ~= Workspace do
-				top = top.Parent
-			end
-			tops[top] = true
-		end
-	end
-	local moved = 0
-	for top in pairs(tops) do
-		top.Parent = folder
-		moved += 1
-	end
-	local available = 0
-	for _, d in ipairs(folder:GetDescendants()) do
-		if d:IsA("MeshPart") and BeyMeshData[d.Name] then
-			available += 1
-		end
-	end
-	return available, moved
-end
-
-return MeshImport
-]=====])
-install('SSS', '', 'ModuleScript', 'VillainAI', [=====[
---!nonstrict
--- VillainAI: drives the villain's bey on the server with the SAME MovementCore rules as the player's bey.
--- Behaviours (one at a time):
---   approach     chase where the player will be (short prediction), keep away from the rim when not attacking
---   windup       TELEGRAPH (red highlight + "!"): slows down, then
---   dash         leans fully in and charges the spot the player was at when the dash started
---   slamWindup   TELEGRAPH (orange highlight + "!!"): hops, then dives onto the player (an air slam)
---   recover      backs off at an angle for a moment after an attack or a hit
---   unstuck      if it barely moves for a while, it pushes back toward the centre
--- Difficulty (GameConfig.Difficulty) sets speed, warning time, aggression and damage.
--- Unverified in Roblox: how this feels and whether it gets stuck on the stadium geometry. See HANDOFF checklist.
-
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local Workspace = game:GetService("Workspace")
-
-local Shared = ReplicatedStorage:WaitForChild("Spinforge")
-local BeyConfig = require(Shared.BeyConfig)
-local GameConfig = require(Shared.GameConfig)
-local MC = require(Shared.Core.MovementCore)
-local LaunchCore = require(Shared.Core.LaunchCore)
-
-local M = BeyConfig.Movement
-local VillainAI = {}
-VillainAI.__index = VillainAI
-
-local RIM_SAFE = 31 -- beyond this radius (from the arena centre) it steers back in unless attacking
-
--- rec: BeyFactory record. diff: GameConfig.Difficulty entry. center: arena centre. ignore: instances the probe ignores.
-function VillainAI.new(rec, diff, center, ignore)
-	local self = setmetatable({}, VillainAI)
-	self.rec = rec
-	self.diff = diff
-	self.center = center
-	self.state = "approach"
-	self.stateAt = 0
-	self.nextAttackAt = 1.5
-	self.ground = MC.newGround()
-	self.actions = MC.newActions()
-	self.stuck = MC.newStuck()
-	self.slowSince = nil
-	self.yaw = 0
-	self.up = Vector3.yAxis
-	self.dashTarget = nil
-	self.rng = Random.new()
-	self.params = RaycastParams.new()
-	self.params.FilterType = Enum.RaycastFilterType.Exclude
-	self.params.FilterDescendantsInstances = ignore
-
-	local hl = Instance.new("Highlight")
-	hl.Name = "Telegraph"
-	hl.FillTransparency = 0.35
-	hl.OutlineTransparency = 0
-	hl.Enabled = false
-	hl.Parent = rec.model
-	self.highlight = hl
-	local bb = Instance.new("BillboardGui")
-	bb.Name = "TelegraphMark"
-	bb.Size = UDim2.fromOffset(60, 60)
-	bb.StudsOffset = Vector3.new(0, 4.5, 0)
-	bb.AlwaysOnTop = true
-	bb.Enabled = false
-	bb.Adornee = rec.body
-	bb.Parent = rec.model
-	local label = Instance.new("TextLabel")
-	label.Size = UDim2.fromScale(1, 1)
-	label.BackgroundTransparency = 1
-	label.Font = Enum.Font.GothamBlack
-	label.TextScaled = true
-	label.TextColor3 = Color3.fromRGB(255, 80, 80)
-	label.TextStrokeTransparency = 0
-	label.Text = "!"
-	label.Parent = bb
-	self.mark = bb
-	self.markLabel = label
-	return self
-end
-
--- The villain's launch boost (from its launch quality): extra top speed that fades over GameConfig.Launch.BoostTime.
-function VillainAI:launched(boost, now)
-	self.launchBoost = boost
-	self.launchAt = now
-	self.nextAttackAt = now + 1.0
-end
-
-function VillainAI:setTelegraph(kind)
-	if kind == nil then
-		self.highlight.Enabled = false
-		self.mark.Enabled = false
-		return
-	end
-	local color = kind == "dash" and Color3.fromRGB(255, 60, 60) or Color3.fromRGB(255, 160, 40)
-	self.highlight.FillColor = color
-	self.highlight.OutlineColor = color
-	self.highlight.Enabled = true
-	self.markLabel.Text = kind == "dash" and "!" or "!!"
-	self.markLabel.TextColor3 = color
-	self.mark.Enabled = true
-end
-
-function VillainAI:go(state, now)
-	self.state = state
-	self.stateAt = now
-end
-
-local function flat(v)
-	return Vector3.new(v.X, 0, v.Z)
-end
-
--- Called every Heartbeat while the battle is active. target: { pos, vel } of the player's bey.
--- onSlamImpact(fallSpeed) is called once when the villain's slam lands.
--- Returns nothing; writes the villain body's velocity and orientation.
-function VillainAI:step(dt, now, target, spinFraction, onSlamImpact)
-	local body = self.rec.body
-	if not body.Parent or body.Anchored then
-		return
-	end
-	dt = MC.safeDt(dt, M)
-	local pos = body.Position
-	local vel = MC.sanitizeVelocity(body.AssemblyLinearVelocity, M)
-	local speed = MC.topSpeed(self.rec.stats, M) * self.diff.Speed
-	if self.launchAt then
-		speed *= LaunchCore.boostMultiplier(self.launchBoost, now - self.launchAt, GameConfig.Launch)
-	end
-
-	-- ground probe (same rules as the player: sphere probe, hysteresis)
-	local normal
-	if not MC.probeSuppressed(self.actions, now, M) then
-		local hit = Workspace:Raycast(pos, Vector3.new(0, -(M.Radius + M.GroundProbe), 0), self.params)
-		normal = hit and hit.Normal or nil
-	end
-	local event = MC.updateGround(self.ground, normal, now, M)
-	if MC.resolveActions(self.actions, event, now, M) == "impact" then
-		onSlamImpact(MC.finite(vel.Y) and math.max(-vel.Y, 0) or 0)
-	end
-
-	local toTarget = flat(target.pos - pos)
-	local dist = toTarget.Magnitude
-	local fromCenter = flat(pos - self.center)
-	local wish, tilt = Vector3.zero, 0
-	local t = now - self.stateAt
-	local s = self.state
-
-	if s == "approach" then
-		local predicted = flat(target.pos + target.vel * 0.35 - pos)
-		wish = predicted.Magnitude > 0.1 and predicted.Unit or Vector3.zero
-		tilt = dist > 18 and -0.4 or 0
-		if fromCenter.Magnitude > RIM_SAFE then
-			wish = (wish + (-fromCenter.Unit) * 1.2)
-			wish = wish.Magnitude > 0.01 and wish.Unit or wish
-		end
-		if now >= self.nextAttackAt and dist < 20 and self.rng:NextNumber() < self.diff.Aggression then
-			if dist < 11 and self.ground.grounded and self.rng:NextNumber() < 0.35 then
-				self:go("slamWindup", now)
-				self:setTelegraph("slam")
-			else
-				self:go("windup", now)
-				self:setTelegraph("dash")
-			end
-		elseif now >= self.nextAttackAt then
-			self.nextAttackAt = now + 0.6 -- re-roll soon
-		end
-	elseif s == "windup" then
-		wish = dist > 0.1 and toTarget.Unit or Vector3.zero
-		tilt = 0.7 -- visibly rears back and slows: the tell
-		if t >= self.diff.Windup then
-			self.dashTarget = target.pos
-			self:go("dash", now)
-		end
-	elseif s == "dash" then
-		local d = flat(self.dashTarget - pos)
-		wish = d.Magnitude > 0.1 and d.Unit or Vector3.zero
-		tilt = -1
-		if t >= 0.9 or d.Magnitude < 2 then
-			self:setTelegraph(nil)
-			self:go("recover", now)
-		end
-	elseif s == "slamWindup" then
-		tilt = 0.5
-		if t >= self.diff.Windup and MC.canJump(self.actions, self.ground, now, M) then
-			vel = MC.jump(self.actions, self.ground, vel, 0.6, now, M)
-			-- hop toward the player so the dive lands near them
-			local push = dist > 0.1 and toTarget.Unit * math.min(dist * 2.2, 40) or Vector3.zero
-			vel = Vector3.new(push.X, vel.Y * 1.15, push.Z)
-			self:go("slamAir", now)
-		elseif t >= self.diff.Windup + 1 then
-			self:setTelegraph(nil)
-			self:go("recover", now)
-		end
-	elseif s == "slamAir" then
-		if MC.canSlam(self.actions, self.ground, now, M) and vel.Y < 5 then
-			vel = MC.startSlam(self.actions, vel, now, M)
-			self:go("slamDive", now)
-		elseif t > 2 then
-			self:setTelegraph(nil)
-			self:go("recover", now)
-		end
-	elseif s == "slamDive" then
-		if self.actions.slam ~= "diving" then
-			self:setTelegraph(nil)
-			self:go("recover", now)
-		end
-	elseif s == "recover" then
-		local away = dist > 0.1 and -toTarget.Unit or Vector3.new(1, 0, 0)
-		local side = Vector3.new(-away.Z, 0, away.X)
-		wish = (away + side * 0.8).Unit
-		if fromCenter.Magnitude > RIM_SAFE - 4 then
-			wish = (-fromCenter).Unit
-		end
-		tilt = 0.2
-		if t >= 1.0 then
-			self.nextAttackAt = now + 0.8 + self.rng:NextNumber() * 1.2
-			self:go("approach", now)
-		end
-	elseif s == "unstuck" then
-		wish = fromCenter.Magnitude > 0.1 and (-fromCenter).Unit or Vector3.new(1, 0, 0)
-		tilt = -0.6
-		if t >= 1.2 then
-			self:go("approach", now)
-		end
-	end
-
-	-- movement (shared rules)
-	if self.ground.grounded then
-		vel = MC.groundVelocity(vel, self.ground.normal, wish, tilt, speed, dt, M)
-	else
-		if event == "tookoff" then
-			vel = vel + Vector3.new(0, MC.takeoffBoost(self.actions, vel, tilt, M), 0)
-		end
-		vel = MC.airVelocity(vel, wish, tilt, speed, self.actions.slam == "diving", dt, M)
-	end
-
-	-- stuck: barely moving on the ground while trying to go somewhere
-	if s ~= "windup" and s ~= "slamWindup" and wish.Magnitude > 0.5 and flat(vel).Magnitude < 2 then
-		self.slowSince = self.slowSince or now
-		if now - self.slowSince > 1.5 then
-			self.slowSince = nil
-			self:setTelegraph(nil)
-			self:go("unstuck", now)
-			vel = vel + Vector3.new(0, 25, 0) + (fromCenter.Magnitude > 0.1 and (-fromCenter).Unit * 20 or Vector3.zero)
-		end
-	else
-		self.slowSince = nil
-	end
-
-	vel = MC.sanitizeVelocity(vel, M)
-	body.AssemblyLinearVelocity = vel
-
-	-- orientation: lean with the surface and its tilt; wobble when low on spin
-	self.yaw = MC.noseYaw(self.yaw, vel, dt, M)
-	self.up = MC.surfaceUp(self.up, self.ground.grounded and self.ground.normal or nil, dt, M)
-	local r, u, b = MC.frame(self.up, self.yaw)
-	local wobble = 0
-	if spinFraction < GameConfig.Combat.LowSpinFraction then
-		wobble = math.sin(now * 9) * 0.25 * (1 - spinFraction / GameConfig.Combat.LowSpinFraction)
-	end
-	self.rec.align.CFrame = CFrame.fromMatrix(Vector3.zero, r, u, b) * CFrame.Angles(tilt * math.rad(M.MaxTiltDeg) * 0.6, 0, wobble)
-end
-
--- A hit lands on the villain: interrupt a windup sometimes and back off.
-function VillainAI:onHit(now)
-	if self.state == "approach" or self.state == "windup" then
-		self:setTelegraph(nil)
-		self:go("recover", now)
-	end
-end
-
--- Idle (countdown / finished): brake to a stop, no attacks.
-function VillainAI:idle(dt)
-	local body = self.rec.body
-	if not body.Parent or body.Anchored then
-		return
-	end
-	self:setTelegraph(nil)
-	local v = body.AssemblyLinearVelocity
-	if MC.finiteVector(v) then
-		body.AssemblyLinearVelocity = Vector3.new(v.X * 0.9, v.Y, v.Z * 0.9)
-	end
-end
-
-function VillainAI:destroy()
-	self:setTelegraph(nil)
-end
-
-return VillainAI
-]=====])
-print('Spinforge installer part 4 of 7 done. Now run part 5.')
+print('Spinforge installer part 4 of 8 done. Now run part 5.')

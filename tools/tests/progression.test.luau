@@ -7,7 +7,7 @@
 --@use src/shared/Core/SessionStore.lua SS
 
 local P, D = GameConfig.Progression, GameConfig.Difficulty
-local parts, starter = BeyConfig.Parts, BeyConfig.StarterBey
+local parts, starter = BeyConfig.Items, BeyConfig.StarterLoadout
 
 local function fresh()
 	return PD.new(starter)
@@ -142,6 +142,47 @@ T.test("repair: bad values fixed, equipped parts must be owned and in the right 
 	T.eq(#d.RecentBattles, 2)
 	T.eq(d.Settings.CameraShake, false)
 	T.eq(d.Settings.ReducedEffects, false)
+end)
+
+T.test("loadout: spirits and specials equip by kind; specials swap between their two slots", function()
+	local data = fresh()
+	T.eq(data.Equipped.Spirit, starter.Spirit)
+	T.eq(data.Equipped.Special1, starter.Special1)
+	T.eq(data.Equipped.Special2, starter.Special2)
+	-- equipping the special that sits in the other slot swaps them
+	T.ok(PR.equip(data, starter.Special2, parts, false, "Special1"))
+	T.eq(data.Equipped.Special1, starter.Special2)
+	T.eq(data.Equipped.Special2, starter.Special1)
+	-- a bought special goes into the slot asked for
+	data.Shards = 10000
+	T.ok(PR.buy(data, "special_quakestomp", parts, P, false))
+	T.ok(PR.equip(data, "special_quakestomp", parts, false, "Special2"))
+	T.eq(data.Equipped.Special2, "special_quakestomp")
+	T.ok(data.Equipped.Special1 ~= data.Equipped.Special2)
+	-- spirits go to Spirit; a special can't land in a part slot
+	T.ok(PR.buy(data, "spirit_stormroc", parts, P, false))
+	T.ok(PR.equip(data, "spirit_stormroc", parts, false))
+	T.eq(data.Equipped.Spirit, "spirit_stormroc")
+	T.eq(data.Equipped.Layer, starter.Layer)
+	T.eq(PR.price("spirit_sunmane", parts, P), P.Prices.Legendary)
+end)
+
+T.test("migrate: a v1 save keeps its parts and gains the starter spirit and specials", function()
+	local v1 = { Version = 1, XP = 500, Shards = 77, Owned = { layer_skyrend = true }, Equipped = { Layer = "layer_skyrend", Disc = starter.Disc, Driver = starter.Driver }, Record = { Wins = 4, Losses = 1, Draws = 0 }, RecentBattles = {}, Settings = {} }
+	local d = PD.migrate(v1, starter, parts)
+	T.eq(d.Version, PD.VERSION)
+	T.eq(d.Equipped.Layer, "layer_skyrend")
+	T.eq(d.Equipped.Spirit, starter.Spirit)
+	T.eq(d.Equipped.Special1, starter.Special1)
+	T.eq(d.Equipped.Special2, starter.Special2)
+	T.ok(d.Owned[starter.Spirit] and d.Owned[starter.Special1] and d.Owned[starter.Special2])
+	T.eq(d.Shards, 77)
+	-- duplicated specials and wrong-kind items are repaired
+	local bad = PD.migrate({ Version = 2, Owned = { special_quakestomp = true }, Equipped = { Special1 = "special_quakestomp", Special2 = "special_quakestomp", Spirit = "layer_cinderlash" } }, starter, parts)
+	T.ok(bad.Equipped.Special1 ~= bad.Equipped.Special2)
+	T.eq(bad.Equipped.Spirit, starter.Spirit)
+	local snap = PD.snapshot(d, 3, "ok")
+	T.eq(snap.Equipped.Special2, starter.Special2)
 end)
 
 -------------------------------------------------------------------------------- sessions (mock store)

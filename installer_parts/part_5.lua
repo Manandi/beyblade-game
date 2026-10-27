@@ -31,6 +31,766 @@ local function install(rootKey, path, class, name, source)
 	s.Source = source
 	s.Parent = parent
 end
+install('SSS', '', 'ModuleScript', 'DataService', [=====[
+--!nonstrict
+-- DataService: loads, holds and saves each player's data using SessionStore (session locks, retries, never
+-- overwriting a real save after a failed load) over Roblox DataStores.
+--
+-- Save status per player (shown to them):
+--   "saving"   loaded normally; autosaves and saves on leave
+--   "nosave"   could not load (DataStore error, or Studio without API access): plays with a temporary profile that is
+--              NEVER written, so the real save stays safe. Shown as a banner.
+--   "locked"   another server still holds this player's session: temporary profile, not saved
+--   "newer"    the save came from a newer game version: temporary profile, not saved
+-- Live DataStore behaviour is unverified here; the rules are tested against a mock (tools/tests/progression.test.luau).
+
+local DataStoreService = game:GetService("DataStoreService")
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+
+local Shared = ReplicatedStorage:WaitForChild("Spinforge")
+local BeyConfig = require(Shared.BeyConfig)
+local GameConfig = require(Shared.GameConfig)
+local PlayerData = require(Shared.Core.PlayerData)
+local Progression = require(Shared.Core.Progression)
+local SessionStore = require(Shared.Core.SessionStore)
+
+local DataService = {}
+
+local G = GameConfig.Data
+local P = GameConfig.Progression
+local profiles = {} -- player -> { data, status, dirty }
+local remotes
+local onReady = {} -- callbacks(player)
+-- Studio has no JobId. Use one fixed id there, so a lock left behind by a stopped test session is picked straight
+-- back up by the next one instead of locking you out of saving for LockTimeout.
+local jobId = (game.JobId ~= "" and game.JobId) or "studio"
+
+-- Adapter: SessionStore's store:update contract over a DataStore.
+local function makeAdapter(ds)
+	return {
+		update = function(_, key, transform)
+			local cancelled = false
+			local ok, result = pcall(function()
+				return ds:UpdateAsync(key, function(old)
+					local new = transform(old)
+					cancelled = new == nil
+					return new
+				end)
+			end)
+			if not ok then
+				return false, result
+			end
+			if cancelled then
+				return true, nil
+			end
+			return true, result
+		end,
+	}
+end
+
+local store
+local storeError
+
+local function keyFor(player)
+	return "u_" .. player.UserId
+end
+
+local function migrate(raw)
+	return PlayerData.migrate(raw, BeyConfig.StarterLoadout, BeyConfig.Items, P.RecentBattleMemory)
+end
+
+local function sessionOpts()
+	return {
+		attempts = G.LoadAttempts,
+		retryWait = G.RetryWait,
+		wait = function(s)
+			task.wait(s)
+		end,
+		now = function()
+			return os.time()
+		end,
+		lockTimeout = G.LockTimeout,
+		migrate = migrate,
+	}
+end
+
+function DataService.levelOf(player)
+	local p = profiles[player]
+	return p and Progression.levelFromXP(p.data.XP, P) or 1
+end
+
+function DataService.get(player)
+	local p = profiles[player]
+	return p and p.data or nil
+end
+
+function DataService.status(player)
+	local p = profiles[player]
+	return p and p.status or "loading"
+end
+
+function DataService.isReady(player)
+	return profiles[player] ~= nil
+end
+
+-- What the client sees: PlayerData.snapshot plus XP needed for this and the next level (for the XP bar).
+function DataService.snapshot(player)
+	local p = profiles[player]
+	if not p then
+		return nil
+	end
+	local level = DataService.levelOf(player)
+	local snap = PlayerData.snapshot(p.data, level, p.status)
+	snap.XPThis = Progression.xpForLevel(level, P)
+	snap.XPNext = level < P.MaxLevel and Progression.xpForLevel(level + 1, P) or snap.XPThis
+	return snap
+end
+
+function DataService.sendProfile(player)
+	if remotes and player.Parent and profiles[player] then
+		remotes.Profile:FireClient(player, DataService.snapshot(player))
+	end
+end
+
+function DataService.markDirty(player)
+	local p = profiles[player]
+	if p then
+		p.dirty = true
+	end
+end
+
+local function save(player, release)
+	local p = profiles[player]
+	if not p or p.status ~= "saving" or not store then
+		return "skipped"
+	end
+	local result, detail = SessionStore.save(store, keyFor(player), jobId, p.data, sessionOpts(), release)
+	if result == "ok" then
+		p.dirty = false
+	elseif result == "lost_lock" then
+		-- Another server took over this player's data: stop writing from here so we can't clobber it.
+		p.status = "locked"
+		warn(("Spinforge: %s's session moved to another server; this server stopped saving it."):format(player.Name))
+		DataService.sendProfile(player)
+	else
+		warn(("Spinforge: saving %s failed (%s). Will retry at the next autosave."):format(player.Name, tostring(detail)))
+	end
+	return result
+end
+DataService.save = save
+
+function DataService.onReady(callback)
+	table.insert(onReady, callback)
+end
+
+local function load(player)
+	local status, data, detail = "nosave", nil, storeError
+	if store then
+		local result
+		result, data, detail = SessionStore.load(store, keyFor(player), jobId, sessionOpts())
+		if result == "ok" then
+			status = "saving"
+		elseif result == "unsupported" then
+			status = "newer"
+		elseif result == "locked" then
+			status = "locked"
+		else
+			status = "nosave"
+		end
+	end
+	if not player.Parent then
+		-- Left while loading: release the lock we may have just taken.
+		if status == "saving" and data then
+			profiles[player] = { data = data, status = status, dirty = false }
+			save(player, true)
+			profiles[player] = nil
+		end
+		return
+	end
+	if status ~= "saving" then
+		warn(("Spinforge: %s plays with a temporary profile (%s: %s). It will NOT be saved."):format(player.Name, status, tostring(detail)))
+		data = PlayerData.new(BeyConfig.StarterLoadout)
+	end
+	profiles[player] = { data = data, status = status, dirty = false }
+	player:SetAttribute("DataReady", true)
+	DataService.sendProfile(player)
+	for _, cb in ipairs(onReady) do
+		task.spawn(cb, player)
+	end
+end
+
+function DataService.start(r)
+	remotes = r
+	local ok, result = pcall(function()
+		return DataStoreService:GetDataStore(G.StoreName)
+	end)
+	if ok then
+		store = makeAdapter(result)
+	else
+		storeError = tostring(result)
+		warn("Spinforge: DataStores unavailable (" .. storeError .. "). Progress will not save this session." .. (RunService:IsStudio() and " In Studio: Game Settings > Security > Enable Studio Access to API Services." or ""))
+	end
+
+	Players.PlayerAdded:Connect(function(player)
+		load(player)
+	end)
+	for _, player in ipairs(Players:GetPlayers()) do
+		task.spawn(load, player)
+	end
+
+	Players.PlayerRemoving:Connect(function(player)
+		if profiles[player] then
+			save(player, true)
+			profiles[player] = nil
+		end
+	end)
+
+	task.spawn(function()
+		while true do
+			task.wait(G.AutosaveInterval)
+			for player, p in pairs(profiles) do
+				if p.dirty and p.status == "saving" then
+					task.spawn(save, player, false)
+				end
+			end
+		end
+	end)
+
+	game:BindToClose(function()
+		local pending = 0
+		for player in pairs(profiles) do
+			pending += 1
+			task.spawn(function()
+				save(player, true)
+				pending -= 1
+			end)
+		end
+		local deadline = os.clock() + 25
+		while pending > 0 and os.clock() < deadline do
+			task.wait(0.2)
+		end
+	end)
+end
+
+return DataService
+]=====])
+install('SSS', '', 'Script', 'Main', [=====[
+--!nonstrict
+-- Spinforge server entry point. Starts everything in a fixed order and prints a startup report to Output.
+-- If something required is missing, it stops with a message saying what to do instead of failing silently.
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
+
+local REQUIRED_SHARED = { "BeyConfig", "BeyDesigns", "BeyMeshData", "BeyVisuals", "GameConfig", "Net", "Core" }
+local Shared = ReplicatedStorage:FindFirstChild("Spinforge")
+if not Shared then
+	error("Spinforge: ReplicatedStorage.Spinforge is missing. Run install_in_studio.lua again (Command Bar).")
+end
+local missing = {}
+for _, name in ipairs(REQUIRED_SHARED) do
+	if not Shared:FindFirstChild(name) then
+		table.insert(missing, name)
+	end
+end
+if #missing > 0 then
+	error("Spinforge: missing shared modules: " .. table.concat(missing, ", ") .. ". Run install_in_studio.lua again.")
+end
+
+local BeyConfig = require(Shared.BeyConfig)
+local GameConfig = require(Shared.GameConfig)
+local Net = require(Shared.Net)
+local Progression = require(Shared.Core.Progression)
+
+local World = require(script.Parent.World)
+local MeshImport = require(script.Parent.MeshImport)
+local DataService = require(script.Parent.DataService)
+local BeyService = require(script.Parent.BeyService)
+local BattleService = require(script.Parent.BattleService)
+
+Workspace.Gravity = BeyConfig.Movement.Gravity
+local remotes = Net.setup(ReplicatedStorage)
+World.removeLegacy()
+local world = World.build(GameConfig.Villain.Name)
+World.polishLighting()
+local meshes, moved = MeshImport.collect()
+
+DataService.start(remotes)
+BeyService.start(remotes, DataService, BattleService.onSlam)
+BeyService.onInterrupted = BattleService.onInterrupted
+BattleService.start(remotes)
+
+-- Hub prompts.
+local function onFootAndReady(player)
+	return BeyService.mode(player) == "OnFoot" and DataService.isReady(player)
+end
+if world.prompts.challenge then
+	world.prompts.challenge.Triggered:Connect(function(player)
+		if onFootAndReady(player) then
+			BattleService.challenge(player)
+		end
+	end)
+end
+if world.prompts.practice then
+	world.prompts.practice.Triggered:Connect(function(player)
+		if onFootAndReady(player) then
+			BeyService.startPractice(player)
+		end
+	end)
+end
+if world.prompts.workshop then
+	world.prompts.workshop.Triggered:Connect(function(player)
+		remotes.BattleEvent:FireClient(player, { kind = "openWorkshop" })
+	end)
+end
+
+-- Workshop: buy and equip parts, spirits and specials, validated on the server. Only allowed on foot.
+remotes.Workshop.OnServerInvoke = function(player, req)
+	local data = DataService.get(player)
+	local function reply(ok, reason)
+		return {
+			ok = ok,
+			reason = reason and (Progression.ReasonText[reason] or reason) or nil,
+			profile = DataService.snapshot(player),
+		}
+	end
+	if not data then
+		return reply(false, "Your profile is still loading.")
+	end
+	if type(req) ~= "table" or type(req.action) ~= "string" or type(req.part) ~= "string" then
+		return reply(false, "invalid")
+	end
+	local mode = BeyService.mode(player)
+	if mode == "Practice" then
+		return reply(false, "Leave practice to change parts.")
+	end
+	local inBattle = mode ~= "OnFoot"
+	local ok, reason
+	if req.action == "buy" then
+		ok, reason = Progression.buy(data, req.part, BeyConfig.Items, GameConfig.Progression, inBattle)
+	elseif req.action == "equip" then
+		local slot = (req.slot == "Special1" or req.slot == "Special2") and req.slot or nil
+		ok, reason = Progression.equip(data, req.part, BeyConfig.Items, inBattle, slot)
+	else
+		return reply(false, "invalid")
+	end
+	if ok then
+		DataService.markDirty(player)
+		DataService.sendProfile(player)
+		return reply(true, nil)
+	end
+	return reply(false, reason)
+end
+
+-- Other requests: settings, tutorial, leaving practice. (Battle requests are handled in BattleService.)
+local SETTINGS = { CameraShake = true, ReducedEffects = true }
+remotes.Request.OnServerEvent:Connect(function(player, req)
+	if type(req) ~= "table" or type(req.action) ~= "string" then
+		return
+	end
+	local data = DataService.get(player)
+	if req.action == "setting" and data and SETTINGS[req.key] and type(req.value) == "boolean" then
+		data.Settings[req.key] = req.value
+		DataService.markDirty(player)
+		DataService.sendProfile(player)
+	elseif req.action == "tutorialDone" and data and not data.Settings.TutorialDone then
+		data.Settings.TutorialDone = true
+		DataService.markDirty(player)
+		DataService.sendProfile(player)
+	elseif req.action == "tutorialReset" and data then
+		data.Settings.TutorialDone = false
+		DataService.markDirty(player)
+		DataService.sendProfile(player)
+	elseif req.action == "exitPractice" and BeyService.mode(player) == "Practice" then
+		BeyService.exit(player)
+	end
+end)
+
+print(("Spinforge server ready: world %s, %d of %d bey meshes available%s, crates disabled (paid purchases off)."):format(
+	world.built and "built" or "found (custom SpinforgeWorld)",
+	meshes,
+	66,
+	moved > 0 and (" (moved " .. moved .. " imported model(s) from Workspace)") or ""
+))
+]=====])
+install('SSS', '', 'ModuleScript', 'MeshImport', [=====[
+--!nonstrict
+-- MeshImport: Studio's 3D importer drops imported models into Workspace. At server start, any bey meshes found
+-- there (MeshParts named like "<partId>_P" / "<partId>_A") are moved into ReplicatedStorage.BeyMeshes, where
+-- BeyVisuals looks for them. Returns how many meshes are available afterwards.
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
+
+local Shared = ReplicatedStorage:WaitForChild("Spinforge")
+local BeyMeshData = require(Shared.BeyMeshData)
+
+local MeshImport = {}
+
+function MeshImport.collect()
+	local folder = ReplicatedStorage:FindFirstChild("BeyMeshes")
+	if not folder then
+		folder = Instance.new("Folder")
+		folder.Name = "BeyMeshes"
+		folder.Parent = ReplicatedStorage
+	end
+	local tops = {}
+	for _, d in ipairs(Workspace:GetDescendants()) do
+		if d:IsA("MeshPart") and BeyMeshData[d.Name] then
+			local top = d
+			while top.Parent and top.Parent ~= Workspace do
+				top = top.Parent
+			end
+			tops[top] = true
+		end
+	end
+	local moved = 0
+	for top in pairs(tops) do
+		top.Parent = folder
+		moved += 1
+	end
+	local available = 0
+	for _, d in ipairs(folder:GetDescendants()) do
+		if d:IsA("MeshPart") and BeyMeshData[d.Name] then
+			available += 1
+		end
+	end
+	return available, moved
+end
+
+return MeshImport
+]=====])
+install('SSS', '', 'ModuleScript', 'VillainAI', [=====[
+--!nonstrict
+-- VillainAI: drives the villain's bey on the server with the SAME MovementCore rules as the player's bey.
+-- Behaviours (one at a time):
+--   approach     chase where the player will be (short prediction), keep away from the rim when not attacking
+--   windup       TELEGRAPH (red highlight + "!"): slows down, then
+--   dash         leans fully in and charges the spot the player was at when the dash started
+--   slamWindup   TELEGRAPH (orange highlight + "!!"): hops, then dives onto the player (an air slam)
+--   recover      backs off at an angle for a moment after an attack or a hit
+--   unstuck      if it barely moves for a while, it pushes back toward the centre
+-- Specials (chooseSpecial, asked by BattleService each frame): a dash special fires as a dash attack starts, a quake
+-- when the player is close, a guard when the player is empowered or awakened, a heal when low; it awakens as soon
+-- as its meter is full. Never more than one special per SPECIAL_GAP seconds, so the player can read them.
+-- Difficulty (GameConfig.Difficulty) sets speed, warning time, aggression and damage.
+-- Unverified in Roblox: how this feels and whether it gets stuck on the stadium geometry. See HANDOFF checklist.
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
+
+local Shared = ReplicatedStorage:WaitForChild("Spinforge")
+local BeyConfig = require(Shared.BeyConfig)
+local GameConfig = require(Shared.GameConfig)
+local MC = require(Shared.Core.MovementCore)
+local LaunchCore = require(Shared.Core.LaunchCore)
+
+local M = BeyConfig.Movement
+local VillainAI = {}
+VillainAI.__index = VillainAI
+
+local SPECIAL_GAP = 2.5 -- minimum seconds between the villain's specials
+local RIM_SAFE = 31 -- beyond this radius (from the arena centre) it steers back in unless attacking
+
+-- rec: BeyFactory record. diff: GameConfig.Difficulty entry. center: arena centre. ignore: instances the probe ignores.
+function VillainAI.new(rec, diff, center, ignore)
+	local self = setmetatable({}, VillainAI)
+	self.rec = rec
+	self.diff = diff
+	self.center = center
+	self.state = "approach"
+	self.stateAt = 0
+	self.nextAttackAt = 1.5
+	self.ground = MC.newGround()
+	self.actions = MC.newActions()
+	self.stuck = MC.newStuck()
+	self.slowSince = nil
+	self.yaw = 0
+	self.up = Vector3.yAxis
+	self.dashTarget = nil
+	self.speedMul = 1 -- spirit passive / awakening (set by BattleService)
+	self.dashStartedAt = -math.huge
+	self.lastSpecialAt = -math.huge
+	self.rng = Random.new()
+	self.params = RaycastParams.new()
+	self.params.FilterType = Enum.RaycastFilterType.Exclude
+	self.params.FilterDescendantsInstances = ignore
+
+	local hl = Instance.new("Highlight")
+	hl.Name = "Telegraph"
+	hl.FillTransparency = 0.35
+	hl.OutlineTransparency = 0
+	hl.Enabled = false
+	hl.Parent = rec.model
+	self.highlight = hl
+	local bb = Instance.new("BillboardGui")
+	bb.Name = "TelegraphMark"
+	bb.Size = UDim2.fromOffset(60, 60)
+	bb.StudsOffset = Vector3.new(0, 4.5, 0)
+	bb.AlwaysOnTop = true
+	bb.Enabled = false
+	bb.Adornee = rec.body
+	bb.Parent = rec.model
+	local label = Instance.new("TextLabel")
+	label.Size = UDim2.fromScale(1, 1)
+	label.BackgroundTransparency = 1
+	label.Font = Enum.Font.GothamBlack
+	label.TextScaled = true
+	label.TextColor3 = Color3.fromRGB(255, 80, 80)
+	label.TextStrokeTransparency = 0
+	label.Text = "!"
+	label.Parent = bb
+	self.mark = bb
+	self.markLabel = label
+	return self
+end
+
+-- The villain's launch boost (from its launch quality): extra top speed that fades over GameConfig.Launch.BoostTime.
+function VillainAI:launched(boost, now)
+	self.launchBoost = boost
+	self.launchAt = now
+	self.nextAttackAt = now + 1.0
+end
+
+function VillainAI:setTelegraph(kind)
+	if kind == nil then
+		self.highlight.Enabled = false
+		self.mark.Enabled = false
+		return
+	end
+	local color = kind == "dash" and Color3.fromRGB(255, 60, 60) or Color3.fromRGB(255, 160, 40)
+	self.highlight.FillColor = color
+	self.highlight.OutlineColor = color
+	self.highlight.Enabled = true
+	self.markLabel.Text = kind == "dash" and "!" or "!!"
+	self.markLabel.TextColor3 = color
+	self.mark.Enabled = true
+end
+
+function VillainAI:go(state, now)
+	self.state = state
+	self.stateAt = now
+end
+
+local function flat(v)
+	return Vector3.new(v.X, 0, v.Z)
+end
+
+-- Called every Heartbeat while the battle is active. target: { pos, vel } of the player's bey.
+-- onSlamImpact(fallSpeed) is called once when the villain's slam lands.
+-- Returns nothing; writes the villain body's velocity and orientation.
+function VillainAI:step(dt, now, target, spinFraction, onSlamImpact)
+	local body = self.rec.body
+	if not body.Parent or body.Anchored then
+		return
+	end
+	dt = MC.safeDt(dt, M)
+	local pos = body.Position
+	local vel = MC.sanitizeVelocity(body.AssemblyLinearVelocity, M)
+	local speed = MC.topSpeed(self.rec.stats, M) * self.diff.Speed * (self.speedMul or 1)
+	if self.launchAt then
+		speed *= LaunchCore.boostMultiplier(self.launchBoost, now - self.launchAt, GameConfig.Launch)
+	end
+
+	-- ground probe (same rules as the player: sphere probe, hysteresis)
+	local normal
+	if not MC.probeSuppressed(self.actions, now, M) then
+		local hit = Workspace:Raycast(pos, Vector3.new(0, -(M.Radius + M.GroundProbe), 0), self.params)
+		normal = hit and hit.Normal or nil
+	end
+	local event = MC.updateGround(self.ground, normal, now, M)
+	if MC.resolveActions(self.actions, event, now, M) == "impact" then
+		onSlamImpact(MC.finite(vel.Y) and math.max(-vel.Y, 0) or 0)
+	end
+
+	local toTarget = flat(target.pos - pos)
+	local dist = toTarget.Magnitude
+	self.lastDist = dist
+	local fromCenter = flat(pos - self.center)
+	local wish, tilt = Vector3.zero, 0
+	local t = now - self.stateAt
+	local s = self.state
+
+	if s == "approach" then
+		local predicted = flat(target.pos + target.vel * 0.35 - pos)
+		wish = predicted.Magnitude > 0.1 and predicted.Unit or Vector3.zero
+		tilt = dist > 18 and -0.4 or 0
+		if fromCenter.Magnitude > RIM_SAFE then
+			wish = (wish + (-fromCenter.Unit) * 1.2)
+			wish = wish.Magnitude > 0.01 and wish.Unit or wish
+		end
+		if now >= self.nextAttackAt and dist < 20 and self.rng:NextNumber() < self.diff.Aggression then
+			if dist < 11 and self.ground.grounded and self.rng:NextNumber() < 0.35 then
+				self:go("slamWindup", now)
+				self:setTelegraph("slam")
+			else
+				self:go("windup", now)
+				self:setTelegraph("dash")
+			end
+		elseif now >= self.nextAttackAt then
+			self.nextAttackAt = now + 0.6 -- re-roll soon
+		end
+	elseif s == "windup" then
+		wish = dist > 0.1 and toTarget.Unit or Vector3.zero
+		tilt = 0.7 -- visibly rears back and slows: the tell
+		if t >= self.diff.Windup then
+			self.dashTarget = target.pos
+			self.dashStartedAt = now
+			self:go("dash", now)
+		end
+	elseif s == "dash" then
+		local d = flat(self.dashTarget - pos)
+		wish = d.Magnitude > 0.1 and d.Unit or Vector3.zero
+		tilt = -1
+		if t >= 0.9 or d.Magnitude < 2 then
+			self:setTelegraph(nil)
+			self:go("recover", now)
+		end
+	elseif s == "slamWindup" then
+		tilt = 0.5
+		if t >= self.diff.Windup and MC.canJump(self.actions, self.ground, now, M) then
+			vel = MC.jump(self.actions, self.ground, vel, 0.6, now, M)
+			-- hop toward the player so the dive lands near them
+			local push = dist > 0.1 and toTarget.Unit * math.min(dist * 2.2, 40) or Vector3.zero
+			vel = Vector3.new(push.X, vel.Y * 1.15, push.Z)
+			self:go("slamAir", now)
+		elseif t >= self.diff.Windup + 1 then
+			self:setTelegraph(nil)
+			self:go("recover", now)
+		end
+	elseif s == "slamAir" then
+		if MC.canSlam(self.actions, self.ground, now, M) and vel.Y < 5 then
+			vel = MC.startSlam(self.actions, vel, now, M)
+			self:go("slamDive", now)
+		elseif t > 2 then
+			self:setTelegraph(nil)
+			self:go("recover", now)
+		end
+	elseif s == "slamDive" then
+		if self.actions.slam ~= "diving" then
+			self:setTelegraph(nil)
+			self:go("recover", now)
+		end
+	elseif s == "recover" then
+		local away = dist > 0.1 and -toTarget.Unit or Vector3.new(1, 0, 0)
+		local side = Vector3.new(-away.Z, 0, away.X)
+		wish = (away + side * 0.8).Unit
+		if fromCenter.Magnitude > RIM_SAFE - 4 then
+			wish = (-fromCenter).Unit
+		end
+		tilt = 0.2
+		if t >= 1.0 then
+			self.nextAttackAt = now + 0.8 + self.rng:NextNumber() * 1.2
+			self:go("approach", now)
+		end
+	elseif s == "unstuck" then
+		wish = fromCenter.Magnitude > 0.1 and (-fromCenter).Unit or Vector3.new(1, 0, 0)
+		tilt = -0.6
+		if t >= 1.2 then
+			self:go("approach", now)
+		end
+	end
+
+	-- movement (shared rules)
+	if self.ground.grounded then
+		vel = MC.groundVelocity(vel, self.ground.normal, wish, tilt, speed, dt, M)
+	else
+		if event == "tookoff" then
+			vel = vel + Vector3.new(0, MC.takeoffBoost(self.actions, vel, tilt, M), 0)
+		end
+		vel = MC.airVelocity(vel, wish, tilt, speed, self.actions.slam == "diving", dt, M)
+	end
+
+	-- stuck: barely moving on the ground while trying to go somewhere
+	if s ~= "windup" and s ~= "slamWindup" and wish.Magnitude > 0.5 and flat(vel).Magnitude < 2 then
+		self.slowSince = self.slowSince or now
+		if now - self.slowSince > 1.5 then
+			self.slowSince = nil
+			self:setTelegraph(nil)
+			self:go("unstuck", now)
+			vel = vel + Vector3.new(0, 25, 0) + (fromCenter.Magnitude > 0.1 and (-fromCenter).Unit * 20 or Vector3.zero)
+		end
+	else
+		self.slowSince = nil
+	end
+
+	vel = MC.sanitizeVelocity(vel, M)
+	body.AssemblyLinearVelocity = vel
+
+	-- orientation: lean with the surface and its tilt; wobble when low on spin
+	self.yaw = MC.noseYaw(self.yaw, vel, dt, M)
+	self.up = MC.surfaceUp(self.up, self.ground.grounded and self.ground.normal or nil, dt, M)
+	local r, u, b = MC.frame(self.up, self.yaw)
+	local wobble = 0
+	if spinFraction < GameConfig.Combat.LowSpinFraction then
+		wobble = math.sin(now * 9) * 0.25 * (1 - spinFraction / GameConfig.Combat.LowSpinFraction)
+	end
+	self.rec.align.CFrame = CFrame.fromMatrix(Vector3.zero, r, u, b) * CFrame.Angles(tilt * math.rad(M.MaxTiltDeg) * 0.6, 0, wobble)
+end
+
+-- Which special to use now, if any: 1 or 2 (slot), "awaken", or nil.
+-- info = { specials = its SpecialsCore side, foe = the player's side, canAwaken = bool, spin = its spin fraction }
+function VillainAI:chooseSpecial(now, info)
+	if now - self.lastSpecialAt < SPECIAL_GAP then
+		return nil
+	end
+	local function pick(choice)
+		self.lastSpecialAt = now
+		return choice
+	end
+	if info.canAwaken then
+		return pick("awaken")
+	end
+	local dist = self.lastDist or math.huge
+	local foe = info.foe
+	local threatened = (foe.empower ~= nil and now <= foe.empower.untilT) or now < foe.awakenedUntil
+	for i, s in ipairs(info.specials.specials) do
+		local def = s.def
+		if def and now >= s.readyAt then
+			local kind, t = def.Kind, def.Tuning
+			if kind == "dash" and self.state == "dash" and now - self.dashStartedAt < 0.15 then
+				return pick(i)
+			elseif kind == "quake" and dist < t.Radius * 0.8 and self.rng:NextNumber() < self.diff.Aggression * 0.05 then
+				return pick(i)
+			elseif kind == "guard" and threatened and dist < 18 then
+				return pick(i)
+			elseif kind == "heal" and info.spin < 0.4 then
+				return pick(i)
+			end
+		end
+	end
+	return nil
+end
+
+-- A hit lands on the villain: interrupt a windup sometimes and back off.
+function VillainAI:onHit(now)
+	if self.state == "approach" or self.state == "windup" then
+		self:setTelegraph(nil)
+		self:go("recover", now)
+	end
+end
+
+-- Idle (countdown / finished): brake to a stop, no attacks.
+function VillainAI:idle(dt)
+	local body = self.rec.body
+	if not body.Parent or body.Anchored then
+		return
+	end
+	self:setTelegraph(nil)
+	local v = body.AssemblyLinearVelocity
+	if MC.finiteVector(v) then
+		body.AssemblyLinearVelocity = Vector3.new(v.X * 0.9, v.Y, v.Z * 0.9)
+	end
+end
+
+function VillainAI:destroy()
+	self:setTelegraph(nil)
+end
+
+return VillainAI
+]=====])
 install('SSS', '', 'ModuleScript', 'World', [=====[
 --!nonstrict
 -- World: builds the play space at server start (runtime only; nothing is saved into the place file).
@@ -305,628 +1065,4 @@ end
 
 return World
 ]=====])
-install('SPS', '', 'ModuleScript', 'Controller', [=====[
---!nonstrict
--- Controller: drives the local player's bey with MovementCore and runs the bey camera.
---   Binds when the player's bey appears in Workspace.Beys (named by UserId); unbinds when it's removed and then
---   ALWAYS restores the normal camera and mouse, so the avatar is playable after a battle, reset or interruption.
---   Physics for the player's bey is client-owned (see HANDOFF.md): this script writes its velocity each frame.
---
--- Input (all platforms):
---   move      WASD / left stick / touch stick (Roblox control module if present, else our own reader)
---   tilt      mouse / right stick / drag on the right half of the screen   (down = lean in, up = brake)
---   jump      Space / gamepad A / JUMP button          slam   click / right trigger / SLAM button (in the air)
---   practice  R or gamepad Y = reset bey, Q or gamepad B = back to the hub
-
-local Players = game:GetService("Players")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local RunService = game:GetService("RunService")
-local UserInputService = game:GetService("UserInputService")
-local Workspace = game:GetService("Workspace")
-
-local Shared = ReplicatedStorage:WaitForChild("Spinforge")
-local BeyConfig = require(Shared.BeyConfig)
-local GameConfig = require(Shared.GameConfig)
-local MC = require(Shared.Core.MovementCore)
-local LaunchCore = require(Shared.Core.LaunchCore)
-
-local M = BeyConfig.Movement
-local MAX_TILT = math.rad(M.MaxTiltDeg)
-
-local Controller = {}
-
-function Controller.start(ctx)
-	local player = Players.LocalPlayer
-	local camera = Workspace.CurrentCamera
-	local remotes, hud, effects, tutorial = ctx.remotes, ctx.hud, ctx.effects, ctx.tutorial
-	local beysFolder = Workspace:WaitForChild("Beys", 30)
-	if not beysFolder then
-		hud:showError("Workspace.Beys never appeared: the server scripts did not start. Check Output for red errors.")
-		return
-	end
-
-	-- state ------------------------------------------------------------------------------------------------
-	local model, body, align
-	local yaw, pitch, noseYaw = 0, 0, 0
-	local up = Vector3.yAxis
-	local ground, actions, stuck = MC.newGround(), MC.newActions(), MC.newStuck()
-	local jumpQueued, slamQueued = false, false
-	local pendingKnockback = Vector3.zero
-	local pendingLaunch = nil -- { speed, boost } from the server's "started" event
-	local launchBoost, launchAt = 0, -math.huge
-	local focus
-	local movedFor, fastAt = 0, -math.huge
-	local flipsAt, flipsRate, lastFlips = os.clock(), 0, 0
-
-	local rayParams = RaycastParams.new()
-	rayParams.FilterType = Enum.RaycastFilterType.Exclude
-	local cameraParams = RaycastParams.new()
-	cameraParams.FilterType = Enum.RaycastFilterType.Exclude
-	local function refreshFilters()
-		local ignore = { beysFolder }
-		if player.Character then
-			table.insert(ignore, player.Character)
-		end
-		local fx = Workspace:FindFirstChild("SpinforgeEffects")
-		if fx then
-			table.insert(ignore, fx)
-		end
-		rayParams.FilterDescendantsInstances = ignore
-		local camIgnore = table.clone(ignore)
-		local worldRoot = Workspace:FindFirstChild("SpinforgeWorld")
-		if worldRoot then
-			for _, f in ipairs(worldRoot:GetDescendants()) do
-				if f.Name == "Barrier" and f:IsA("Folder") then
-					table.insert(camIgnore, f)
-				end
-			end
-		end
-		cameraParams.FilterDescendantsInstances = camIgnore
-	end
-	refreshFilters()
-	player.CharacterAdded:Connect(refreshFilters)
-
-	-- move input: Roblox's control module if it loads, otherwise our own reader --------------------------------
-	local controls = nil
-	task.spawn(function()
-		local module = player:WaitForChild("PlayerScripts"):WaitForChild("PlayerModule", 10)
-		if module then
-			local ok, result = pcall(function()
-				return require(module):GetControls()
-			end)
-			if ok then
-				controls = result
-			end
-		end
-	end)
-
-	local touchStick = { input = nil, origin = Vector2.zero, vec = Vector2.zero }
-	local function clearInputs()
-		jumpQueued, slamQueued = false, false
-		touchStick.input = nil
-		touchStick.vec = Vector2.zero
-	end
-	UserInputService.WindowFocusReleased:Connect(clearInputs)
-
-	UserInputService.TouchStarted:Connect(function(touch, processed)
-		if processed or not body or touchStick.input or touch.Position.X > camera.ViewportSize.X * 0.5 then
-			return
-		end
-		touchStick.input = touch
-		touchStick.origin = Vector2.new(touch.Position.X, touch.Position.Y)
-	end)
-	UserInputService.TouchMoved:Connect(function(touch)
-		if touch == touchStick.input then
-			local d = (Vector2.new(touch.Position.X, touch.Position.Y) - touchStick.origin) / 60
-			touchStick.vec = d.Magnitude > 1 and d.Unit or d
-		end
-	end)
-	UserInputService.TouchEnded:Connect(function(touch)
-		if touch == touchStick.input then
-			touchStick.input = nil
-			touchStick.vec = Vector2.zero
-		end
-	end)
-
-	local function moveVector() -- x = right, z = back
-		if UserInputService:GetFocusedTextBox() or hud:mouseFree() then
-			return Vector3.zero
-		end
-		if controls then
-			local ok, v = pcall(function()
-				return controls:GetMoveVector()
-			end)
-			if ok and v and v.Magnitude > 0 then
-				return v
-			end
-		end
-		local K = Enum.KeyCode
-		local x = (UserInputService:IsKeyDown(K.D) and 1 or 0) - (UserInputService:IsKeyDown(K.A) and 1 or 0)
-		local z = (UserInputService:IsKeyDown(K.S) and 1 or 0) - (UserInputService:IsKeyDown(K.W) and 1 or 0)
-		for _, state in ipairs(UserInputService:GetGamepadState(Enum.UserInputType.Gamepad1)) do
-			if state.KeyCode == Enum.KeyCode.Thumbstick1 and state.Position.Magnitude > 0.15 then
-				x += state.Position.X
-				z -= state.Position.Y
-			end
-		end
-		x += touchStick.vec.X
-		z += touchStick.vec.Y
-		local v = Vector3.new(x, 0, z)
-		return v.Magnitude > 1 and v.Unit or v
-	end
-
-	local function mode()
-		return player:GetAttribute("Mode") or "OnFoot"
-	end
-
-	local function resetBey()
-		if not body or body.Anchored then
-			return
-		end
-		local at = player:GetAttribute("BeySpawn")
-		if typeof(at) == "Vector3" then
-			body.AssemblyLinearVelocity = Vector3.zero
-			body.CFrame = CFrame.new(at)
-		end
-		ground, actions, stuck = MC.newGround(), MC.newActions(), MC.newStuck()
-	end
-
-	UserInputService.JumpRequest:Connect(function()
-		if body then
-			jumpQueued = true
-		end
-	end)
-	hud.touchJump.Activated:Connect(function()
-		jumpQueued = true
-	end)
-	hud.touchSlam.Activated:Connect(function()
-		slamQueued = true
-	end)
-
-	UserInputService.InputBegan:Connect(function(input, processed)
-		if processed or not body or UserInputService:GetFocusedTextBox() then
-			return
-		end
-		local kc = input.KeyCode
-		if input.UserInputType == Enum.UserInputType.MouseButton1 and not hud:mouseFree() then
-			slamQueued = true
-		elseif kc == Enum.KeyCode.ButtonR2 then
-			slamQueued = true
-		elseif kc == Enum.KeyCode.Space or kc == Enum.KeyCode.ButtonA then
-			jumpQueued = true
-		elseif (kc == Enum.KeyCode.R or kc == Enum.KeyCode.ButtonY) and mode() == "Practice" then
-			resetBey()
-		elseif (kc == Enum.KeyCode.Q or kc == Enum.KeyCode.ButtonB) and mode() == "Practice" then
-			remotes.Request:FireServer({ action = "exitPractice" })
-		end
-	end)
-
-	UserInputService.InputChanged:Connect(function(input, processed)
-		if not body or processed or input.UserInputType ~= Enum.UserInputType.Touch or input == touchStick.input then
-			return
-		end
-		yaw -= input.Delta.X * M.TouchSensitivity
-		pitch = math.clamp(pitch - input.Delta.Y * M.TouchSensitivity, -MAX_TILT, MAX_TILT)
-	end)
-
-	remotes.Knockback.OnClientEvent:Connect(function(v)
-		if body and typeof(v) == "Vector3" and MC.finiteVector(v) then
-			pendingKnockback = MC.clampMagnitude(pendingKnockback + v, 200)
-			effects:shake(math.clamp(v.Magnitude / 80, 0.2, 1))
-		end
-	end)
-
-	-- bind / unbind -----------------------------------------------------------------------------------------------
-	local function unbind()
-		model, body, align = nil, nil, nil
-		clearInputs()
-		pendingKnockback = Vector3.zero
-		hud:showTouchButtons(false)
-		tutorial:setActive(false)
-		-- Always give the normal camera and mouse back.
-		camera.CameraType = Enum.CameraType.Custom
-		local hum = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
-		if hum then
-			camera.CameraSubject = hum
-		end
-		UserInputService.MouseBehavior = Enum.MouseBehavior.Default
-		UserInputService.MouseIconEnabled = true
-	end
-
-	local function bind(newModel)
-		local b = newModel:WaitForChild("Body", 5)
-		local a = newModel:WaitForChild("Align", 5)
-		if not (b and a) or newModel.Parent ~= beysFolder then
-			warn("Spinforge: bey model incomplete; not controlling it")
-			return
-		end
-		model, body, align = newModel, b, a
-		ground, actions, stuck = MC.newGround(), MC.newActions(), MC.newStuck()
-		clearInputs()
-		pendingKnockback = Vector3.zero
-		pendingLaunch, launchBoost, launchAt = nil, 0, -math.huge
-		local look = body.CFrame.LookVector
-		yaw = math.atan2(-look.X, -look.Z)
-		noseYaw, pitch, up, focus = yaw, 0, Vector3.yAxis, nil
-		camera.CameraSubject = body
-		hud:showTouchButtons(true)
-		tutorial:setActive(true)
-		refreshFilters()
-	end
-
-	beysFolder.ChildAdded:Connect(function(child)
-		if child.Name == tostring(player.UserId) then
-			bind(child)
-		end
-	end)
-	beysFolder.ChildRemoved:Connect(function(child)
-		if child == model then
-			unbind()
-		end
-	end)
-	for _, child in ipairs(beysFolder:GetChildren()) do
-		if child.Name == tostring(player.UserId) then
-			task.spawn(bind, child)
-		end
-	end
-
-	-- physics step ----------------------------------------------------------------------------------------------
-	local function readGamepadAim(dt)
-		for _, state in ipairs(UserInputService:GetGamepadState(Enum.UserInputType.Gamepad1)) do
-			if state.KeyCode == Enum.KeyCode.Thumbstick2 and state.Position.Magnitude > 0.15 then
-				yaw -= state.Position.X * 2.6 * dt
-				pitch = math.clamp(pitch + state.Position.Y * 1.6 * dt, -MAX_TILT, MAX_TILT)
-			end
-		end
-	end
-
-	local function stats()
-		return {
-			Attack = body:GetAttribute("Attack") or 0,
-			Balance = body:GetAttribute("Balance") or 0,
-		}
-	end
-
-	local function step(rawDt)
-		if not body or not body.Parent then
-			return
-		end
-		local dt = MC.safeDt(rawDt, M)
-		readGamepadAim(dt)
-		if body.Anchored then
-			jumpQueued, slamQueued = false, false
-			return -- countdown: frozen by the server
-		end
-		local now = os.clock()
-		local m = mode()
-		local pos = body.Position
-
-		if pos.Y < M.RespawnY and m == "Practice" then
-			resetBey()
-			return
-		end
-
-		local vel = MC.sanitizeVelocity(body.AssemblyLinearVelocity, M)
-		if pendingKnockback.Magnitude > 0 then
-			vel += pendingKnockback
-			pendingKnockback = Vector3.zero
-		end
-
-		local tilt = math.clamp(pitch / MAX_TILT, -1, 1)
-		local mv = moveVector()
-		local yawCF = CFrame.Angles(0, yaw, 0)
-		local wish = yawCF.RightVector * mv.X + yawCF.LookVector * -mv.Z
-		if wish.Magnitude > 1 then
-			wish = wish.Unit
-		end
-		local speed = MC.topSpeed(stats(), M) * LaunchCore.boostMultiplier(launchBoost, now - launchAt, GameConfig.Launch)
-
-		-- LET IT RIP: shoot off the line where the camera is aiming.
-		if pendingLaunch then
-			local aim = Vector3.new(camera.CFrame.LookVector.X, 0, camera.CFrame.LookVector.Z)
-			aim = aim.Magnitude > 0.01 and aim.Unit or Vector3.new(-math.sin(yaw), 0, -math.cos(yaw))
-			vel = Vector3.new(aim.X * pendingLaunch.speed, vel.Y, aim.Z * pendingLaunch.speed)
-			launchBoost, launchAt = pendingLaunch.boost, now
-			pendingLaunch = nil
-		end
-
-		-- ground probe: a sphere cast (wider than a ray, so slab seams don't drop us), ray as fallback
-		local normal
-		if not MC.probeSuppressed(actions, now, M) then
-			local dist = M.Radius - M.ProbeRadius + M.GroundProbe
-			local ok, hit = pcall(function()
-				return Workspace:Spherecast(pos, M.ProbeRadius, Vector3.new(0, -dist, 0), rayParams)
-			end)
-			if not ok then
-				hit = Workspace:Raycast(pos, Vector3.new(0, -(M.Radius + M.GroundProbe), 0), rayParams)
-			end
-			normal = hit and hit.Normal or nil
-		end
-		local ev = MC.updateGround(ground, normal, now, M)
-		if MC.resolveActions(actions, ev, now, M) == "impact" then
-			remotes.SlamLanded:FireServer()
-			effects:slamRing(pos - Vector3.new(0, M.Radius - 0.2, 0), math.clamp(-vel.Y / M.SlamSpeed, 0.4, 1))
-			effects:shake(0.6)
-			tutorial:signal("slammed")
-		end
-
-		if ground.grounded then
-			vel = MC.groundVelocity(vel, ground.normal, wish, tilt, speed, dt, M)
-			if jumpQueued and MC.canJump(actions, ground, now, M) then
-				vel = MC.jump(actions, ground, vel, tilt, now, M)
-			end
-		else
-			if ev == "tookoff" then
-				local boost = MC.takeoffBoost(actions, vel, tilt, M)
-				if boost ~= 0 then
-					vel += Vector3.new(0, boost, 0)
-					if tilt > 0.25 then
-						tutorial:signal("launched")
-					end
-				end
-			end
-			vel = MC.airVelocity(vel, wish, tilt, speed, actions.slam == "diving", dt, M)
-			if slamQueued and MC.canSlam(actions, ground, now, M) then
-				vel = MC.startSlam(actions, vel, now, M)
-			end
-		end
-		jumpQueued, slamQueued = false, false
-
-		-- recovery: wedged somewhere in the air without moving
-		if MC.isStuck(stuck, ground.grounded, vel, now, M) then
-			if m == "Practice" then
-				resetBey()
-				return
-			end
-			local center = player:GetAttribute("ArenaCenter")
-			local toCenter = typeof(center) == "Vector3" and Vector3.new(center.X - pos.X, 0, center.Z - pos.Z) or Vector3.zero
-			vel = Vector3.new(0, 30, 0) + (toCenter.Magnitude > 0.1 and toCenter.Unit * 20 or Vector3.zero)
-			stuck = MC.newStuck()
-		end
-
-		vel = MC.sanitizeVelocity(vel, M)
-		body.AssemblyLinearVelocity = vel
-
-		-- tutorial signals
-		local flatSpeed = Vector3.new(vel.X, 0, vel.Z).Magnitude
-		if mv.Magnitude > 0.5 then
-			movedFor += dt
-			if movedFor > 1 then
-				tutorial:signal("moved")
-			end
-		end
-		if flatSpeed > 20 then
-			fastAt = now
-		end
-		if tilt < -0.5 and flatSpeed > speed then
-			tutorial:signal("leaned")
-		end
-		if tilt > 0.5 and flatSpeed < 8 and now - fastAt < 3 then
-			tutorial:signal("braked")
-		end
-
-		-- orientation: lean with the surface, then the player's tilt; wobble when low on spin
-		noseYaw = MC.noseYaw(noseYaw, vel, dt, M)
-		up = MC.surfaceUp(up, ground.grounded and ground.normal or nil, dt, M)
-		local r, u, b = MC.frame(up, noseYaw)
-		local spin, maxSpin = body:GetAttribute("Spin"), body:GetAttribute("MaxSpin")
-		local wobble = 0
-		local low = GameConfig.Combat.LowSpinFraction
-		if spin and maxSpin and maxSpin > 0 and spin / maxSpin < low then
-			wobble = math.sin(now * 9) * 0.25 * (1 - (spin / maxSpin) / low)
-		end
-		align.CFrame = CFrame.fromMatrix(Vector3.zero, r, u, b) * CFrame.Angles(pitch, 0, wobble)
-
-		-- HUD
-		local readyFrac = 1 - math.max(actions.slamReadyAt - now, 0) / M.SlamCooldown
-		if ground.grounded then
-			readyFrac = math.min(readyFrac, 0.99)
-		end
-		hud:setSlam(readyFrac, actions.slam == "diving")
-	end
-	RunService.Heartbeat:Connect(step)
-
-	-- camera ----------------------------------------------------------------------------------------------------
-	RunService:BindToRenderStep("SpinforgeCamera", Enum.RenderPriority.Camera.Value + 1, function(dt)
-		if not body or not body.Parent then
-			return
-		end
-		camera.CameraType = Enum.CameraType.Scriptable
-		if hud:mouseFree() then
-			UserInputService.MouseBehavior = Enum.MouseBehavior.Default
-			UserInputService.MouseIconEnabled = true
-		else
-			UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter
-			UserInputService.MouseIconEnabled = false
-			local delta = UserInputService:GetMouseDelta()
-			yaw -= delta.X * M.MouseSensitivity
-			pitch = math.clamp(pitch - delta.Y * M.MouseSensitivity, -MAX_TILT, MAX_TILT)
-		end
-		local target = body.Position + Vector3.new(0, M.CameraHeight, 0)
-		focus = focus and focus:Lerp(target, 1 - math.exp(-22 * dt)) or target
-		local camPitch = math.clamp(M.CameraBasePitch - pitch * 0.8, M.CameraMinPitch, 1.1)
-		local wanted = (CFrame.new(focus) * CFrame.Angles(0, yaw, 0) * CFrame.Angles(-camPitch, 0, 0) * CFrame.new(0, 0, M.CameraDistance)).Position
-		local hit = Workspace:Raycast(focus, wanted - focus, cameraParams)
-		if hit then
-			wanted = hit.Position + (focus - hit.Position).Unit * 0.8
-		end
-		camera.CFrame = CFrame.lookAt(wanted, focus) * effects:shakeOffset(dt)
-	end)
-
-	-- Called by Main when the battle starts. Applied on the first unfrozen frame.
-	function Controller.launch(speed, boost)
-		if body and MC.finite(speed) and MC.finite(boost) then
-			pendingLaunch = { speed = math.clamp(speed, 0, 120), boost = math.clamp(boost, 0, 1) }
-		end
-	end
-
-	function Controller.isBound()
-		return body ~= nil and body.Parent ~= nil
-	end
-
-	-- diagnostics (F6) ------------------------------------------------------------------------------------------
-	function Controller.diag()
-		local now = os.clock()
-		if now - flipsAt >= 1 then
-			flipsRate = (ground.flips - lastFlips) / (now - flipsAt)
-			lastFlips, flipsAt = ground.flips, now
-		end
-		if not body then
-			return "bey: none (on foot)"
-		end
-		local v = body.AssemblyLinearVelocity
-		return ("bey: bound%s\nground: %s  flips/s %.1f\nspeed %.0f  vy %.0f\ntilt %+.0f deg  slam %s\nmove src: %s"):format(
-			body.Anchored and " (frozen)" or "",
-			ground.grounded and "yes" or "no",
-			flipsRate,
-			Vector3.new(v.X, 0, v.Z).Magnitude,
-			v.Y,
-			math.deg(pitch),
-			actions.slam,
-			controls and "control module" or "fallback reader"
-		)
-	end
-end
-
-function Controller.diag()
-	return "controller not started"
-end
-
-function Controller.isBound()
-	return false
-end
-
-function Controller.launch() end
-
-return Controller
-]=====])
-install('SPS', '', 'ModuleScript', 'Effects', [=====[
---!nonstrict
--- Effects: client-only visual feedback with hard caps (pooled parts, never more than MAX_* alive at once).
---   slamRing(pos, scale)    expanding ring where a slam lands
---   sparks(pos, color, n)   short burst for hits
---   shake(amount)           camera shake impulse (off when the player disables it)
--- Reduced effects (setting) skips sparks and shrinks rings; camera shake has its own setting.
-
-local TweenService = game:GetService("TweenService")
-local Workspace = game:GetService("Workspace")
-
-local Effects = {}
-Effects.__index = Effects
-
-local MAX_RINGS = 6
-local MAX_SPARKS = 24
-
-function Effects.new(getSettings)
-	local self = setmetatable({}, Effects)
-	self.getSettings = getSettings
-	self.folder = Instance.new("Folder")
-	self.folder.Name = "SpinforgeEffects"
-	self.folder.Parent = Workspace
-	self.rings, self.sparkParts = {}, {}
-	self.active = 0
-	self.shakeAmount = 0
-	return self
-end
-
-local function makePart(folder, shape)
-	local p = Instance.new("Part")
-	p.Anchored = true
-	p.CanCollide = false
-	p.CanQuery = false
-	p.CanTouch = false
-	p.CastShadow = false
-	p.Material = Enum.Material.Neon
-	p.Shape = shape
-	p.Transparency = 1
-	p.Size = Vector3.new(0.4, 1, 1)
-	p.Parent = folder
-	return p
-end
-
--- Takes a free part from a pool (or makes one under the cap). Returns nil when the cap is reached.
-local function take(pool, max, folder, shape)
-	for _, p in ipairs(pool) do
-		if not p:GetAttribute("Busy") then
-			p:SetAttribute("Busy", true)
-			return p
-		end
-	end
-	if #pool < max then
-		local p = makePart(folder, shape)
-		p:SetAttribute("Busy", true)
-		table.insert(pool, p)
-		return p
-	end
-	return nil
-end
-
-function Effects:_play(p, goal, time)
-	self.active += 1
-	local tween = TweenService:Create(p, TweenInfo.new(time, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), goal)
-	tween.Completed:Connect(function()
-		p.Transparency = 1
-		p:SetAttribute("Busy", false)
-		self.active -= 1
-	end)
-	tween:Play()
-end
-
-function Effects:slamRing(pos, scale, color)
-	local s = self.getSettings()
-	local p = take(self.rings, MAX_RINGS, self.folder, Enum.PartType.Cylinder)
-	if not p then
-		return
-	end
-	local r = (s.ReducedEffects and 10 or 18) * math.clamp(scale or 1, 0.3, 1.5)
-	p.Color = color or Color3.fromRGB(255, 120, 60)
-	p.Size = Vector3.new(0.4, 2, 2)
-	p.CFrame = CFrame.new(pos) * CFrame.Angles(0, 0, math.rad(90))
-	p.Transparency = 0.2
-	self:_play(p, { Size = Vector3.new(0.4, r * 2, r * 2), Transparency = 1 }, 0.35)
-end
-
-function Effects:sparks(pos, color, n)
-	local s = self.getSettings()
-	if s.ReducedEffects then
-		return
-	end
-	for _ = 1, math.min(n or 6, 8) do
-		local p = take(self.sparkParts, MAX_SPARKS, self.folder, Enum.PartType.Ball)
-		if not p then
-			return
-		end
-		p.Color = color or Color3.fromRGB(255, 230, 150)
-		p.Size = Vector3.new(0.5, 0.5, 0.5)
-		p.CFrame = CFrame.new(pos)
-		p.Transparency = 0
-		local dir = Vector3.new(math.random() - 0.5, math.random() * 0.8, math.random() - 0.5)
-		dir = dir.Magnitude > 0.01 and dir.Unit or Vector3.yAxis
-		self:_play(p, { CFrame = CFrame.new(pos + dir * (3 + math.random() * 3)), Size = Vector3.new(0.1, 0.1, 0.1), Transparency = 1 }, 0.3)
-	end
-end
-
-function Effects:shake(amount)
-	if self.getSettings().CameraShake then
-		self.shakeAmount = math.min(self.shakeAmount + amount, 1.2)
-	end
-end
-
--- Camera offset for this frame; decays quickly.
-function Effects:shakeOffset(dt)
-	if self.shakeAmount <= 0.001 then
-		self.shakeAmount = 0
-		return CFrame.new()
-	end
-	local a = self.shakeAmount
-	self.shakeAmount = math.max(0, a - dt * 3)
-	return CFrame.new((math.random() - 0.5) * a, (math.random() - 0.5) * a, 0) * CFrame.Angles(0, 0, (math.random() - 0.5) * a * 0.03)
-end
-
-function Effects:count()
-	return self.active
-end
-
-return Effects
-]=====])
-print('Spinforge installer part 5 of 7 done. Now run part 6.')
+print('Spinforge installer part 5 of 8 done. Now run part 6.')

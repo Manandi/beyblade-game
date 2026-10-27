@@ -67,7 +67,7 @@ if world.prompts.workshop then
 	end)
 end
 
--- Workshop: buy and equip, validated on the server. Changing parts is only allowed on foot.
+-- Workshop: buy and equip parts, spirits and specials, validated on the server. Only allowed on foot.
 remotes.Workshop.OnServerInvoke = function(player, req)
 	local data = DataService.get(player)
 	local function reply(ok, reason)
@@ -90,9 +90,10 @@ remotes.Workshop.OnServerInvoke = function(player, req)
 	local inBattle = mode ~= "OnFoot"
 	local ok, reason
 	if req.action == "buy" then
-		ok, reason = Progression.buy(data, req.part, BeyConfig.Parts, GameConfig.Progression, inBattle)
+		ok, reason = Progression.buy(data, req.part, BeyConfig.Items, GameConfig.Progression, inBattle)
 	elseif req.action == "equip" then
-		ok, reason = Progression.equip(data, req.part, BeyConfig.Parts, inBattle)
+		local slot = (req.slot == "Special1" or req.slot == "Special2") and req.slot or nil
+		ok, reason = Progression.equip(data, req.part, BeyConfig.Items, inBattle, slot)
 	else
 		return reply(false, "invalid")
 	end

@@ -239,6 +239,62 @@ T.test("slam: refused without a real fall, accepted after one", function()
 	noErrors("slam")
 end)
 
+T.test("specials: used through the server, cooldowns refuse spam, HUD snapshots arrive", function()
+	local vb, pb = villainBody(), bodyOf(alice)
+	for _ = 1, 10 do
+		vb.CFrame = CFrame.new(-10, 3, 0)
+		pb.CFrame = CFrame.new(10, 3, 0)
+		Mock.advance(1 / 60)
+	end
+	local function mine(kind)
+		local out = {}
+		for _, e in ipairs(events(alice, kind)) do
+			if e.who == nil or e.who == "player" then
+				table.insert(out, e)
+			end
+		end
+		return out
+	end
+	local used0, refused0 = #mine("special"), #events(alice, "specialRefused")
+	request(alice, { action = "special", index = 1 })
+	Mock.advance(1 / 60)
+	local used = mine("special")
+	T.eq(#used, used0 + 1, "special 1 used")
+	T.eq(used[#used].special, "dash")
+	T.ok(used[#used].dash and used[#used].dash > 0, "dash speed sent to the client")
+	T.eq(used[#used].spirit, "spirit_emberwolf", "the spirit appears with it")
+	request(alice, { action = "special", index = 1 })
+	Mock.advance(1 / 60)
+	T.eq(#events(alice, "specialRefused"), refused0 + 1, "cooldown refuses a second use")
+	request(alice, { action = "special", index = 2 })
+	Mock.advance(1 / 60)
+	T.eq(mine("special")[#mine("special")].special, "guard")
+	request(alice, { action = "special", index = 7 })
+	Mock.advance(0.3)
+	local snaps = events(alice, "specials")
+	T.ok(#snaps > 0, "HUD snapshots")
+	local before = snaps[#snaps].you
+	T.ok(before.specials[1].left > 0, "cooldown shown")
+	T.ok(before.meter > 0, "meter filling (passive and from the earlier hits)")
+	local function awakenings()
+		local n = 0
+		for _, e in ipairs(events(alice, "awaken")) do
+			if e.who == "player" then
+				n += 1
+			end
+		end
+		return n
+	end
+	request(alice, { action = "awaken" })
+	Mock.advance(1 / 60)
+	T.eq(awakenings(), before.meter >= 1 and 1 or 0, "awakens only with a full meter (meter " .. before.meter .. ")")
+	request(alice, { action = "awaken" })
+	Mock.advance(1 / 60)
+	T.ok(awakenings() <= 1, "never twice")
+	T.eq(alice:GetAttribute("BattleState"), "active")
+	noErrors("specials")
+end)
+
 T.test("ring-out: the villain leaves the stadium, the player wins and is rewarded once", function()
 	local xp0 = lastProfile(alice).XP
 	for _ = 1, 40 do -- held outside for longer than the ring-out grace

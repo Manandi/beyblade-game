@@ -97,8 +97,10 @@ function Progression.buy(data, partId, parts, P, inBattle)
 	return true, cost
 end
 
--- Equip an owned part into its own slot. Never during a battle.
-function Progression.equip(data, partId, parts, inBattle)
+-- Equip an owned item into its slot. Never during a battle. parts = BeyConfig.Items (parts, spirits, specials).
+-- Specials have two slots: `slot` picks "Special1" or "Special2" (default Special1). Equipping the special that is
+-- already in the other slot swaps the two.
+function Progression.equip(data, partId, parts, inBattle, slot)
 	if inBattle then
 		return false, "in_battle"
 	end
@@ -108,6 +110,15 @@ function Progression.equip(data, partId, parts, inBattle)
 	end
 	if not data.Owned[partId] then
 		return false, "not_owned"
+	end
+	if part.Slot == "Special" then
+		slot = (slot == "Special2") and "Special2" or "Special1"
+		local other = slot == "Special1" and "Special2" or "Special1"
+		if data.Equipped[other] == partId then
+			data.Equipped[other] = data.Equipped[slot]
+		end
+		data.Equipped[slot] = partId
+		return true
 	end
 	data.Equipped[part.Slot] = partId
 	return true

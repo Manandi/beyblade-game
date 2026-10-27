@@ -64,7 +64,7 @@ local function keyFor(player)
 end
 
 local function migrate(raw)
-	return PlayerData.migrate(raw, BeyConfig.StarterBey, BeyConfig.Parts, P.RecentBattleMemory)
+	return PlayerData.migrate(raw, BeyConfig.StarterLoadout, BeyConfig.Items, P.RecentBattleMemory)
 end
 
 local function sessionOpts()
@@ -177,7 +177,7 @@ local function load(player)
 	end
 	if status ~= "saving" then
 		warn(("Spinforge: %s plays with a temporary profile (%s: %s). It will NOT be saved."):format(player.Name, status, tostring(detail)))
-		data = PlayerData.new(BeyConfig.StarterBey)
+		data = PlayerData.new(BeyConfig.StarterLoadout)
 	end
 	profiles[player] = { data = data, status = status, dirty = false }
 	player:SetAttribute("DataReady", true)

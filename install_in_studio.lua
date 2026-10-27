@@ -171,6 +171,66 @@ end
 -- What a player owns at the start: all Common.
 BeyConfig.StarterBey = { Layer = "layer_cinderlash", Disc = "disc_pebbledisc", Driver = "driver_flatnub" }
 
+-- Spirits and special moves are equipped next to the three parts (the "loadout"). What they do in battle is in
+-- Core/SpecialsCore.lua; the numbers are here. Every name and creature is ORIGINAL.
+--   Spirit   the creature that appears when you use a special or awaken. Passive: small always-on multipliers.
+--   Special  two slots (keys 1 and 2). Kinds: dash (burst forward; your next hit hits harder), guard (take less
+--            damage and knockback for a while), heal (get spin back), quake (shockwave around you).
+local SPIRIT_ROWS = {
+	-- id, name, rarity, colour, passive multipliers
+	{ "spirit_emberwolf", "Ember Wolf", "Common", Color3.fromRGB(255, 122, 46), { Attack = 1.04 } },
+	{ "spirit_tidedrake", "Tide Drake", "Uncommon", Color3.fromRGB(79, 227, 255), { Defense = 1.06 } },
+	{ "spirit_thornstag", "Thorn Stag", "Rare", Color3.fromRGB(140, 255, 106), { Defense = 1.03, Drain = 0.92 } },
+	{ "spirit_stormroc", "Storm Roc", "Epic", Color3.fromRGB(111, 155, 255), { Attack = 1.04, Speed = 1.06 } },
+	{ "spirit_sunmane", "Sunmane Lion", "Legendary", Color3.fromRGB(255, 201, 64), { Attack = 1.07, Defense = 1.05 } },
+}
+local SPECIAL_ROWS = {
+	-- id, name, rarity, colour, kind, tuning (Cooldown seconds; see SpecialsCore for each field)
+	{ "special_cometdrive", "Comet Drive", "Common", Color3.fromRGB(255, 150, 60), "dash", { Cooldown = 9, DashSpeed = 95, Window = 1.6, DamageMul = 1.8, KnockbackMul = 1.6 } },
+	{ "special_ironshell", "Iron Shell", "Common", Color3.fromRGB(140, 190, 255), "guard", { Cooldown = 14, Duration = 3.5, Block = 0.5, KnockbackBlock = 0.6 } },
+	{ "special_secondspin", "Second Spin", "Uncommon", Color3.fromRGB(110, 255, 150), "heal", { Cooldown = 22, Heal = 0.14 } },
+	{ "special_quakestomp", "Quake Stomp", "Rare", Color3.fromRGB(255, 196, 70), "quake", { Cooldown = 12, Radius = 14, Damage = 9, Knockback = 60 } },
+	{ "special_starbreaker", "Starbreaker Rush", "Epic", Color3.fromRGB(190, 110, 255), "dash", { Cooldown = 11, DashSpeed = 115, Window = 1.8, DamageMul = 2.2, KnockbackMul = 1.9 } },
+	{ "special_aegisbloom", "Aegis Bloom", "Legendary", Color3.fromRGB(255, 120, 200), "guard", { Cooldown = 16, Duration = 4.5, Block = 0.65, KnockbackBlock = 0.8, Heal = 0.05 } },
+}
+
+BeyConfig.Spirits = {} -- id -> { Id, Name, Slot = "Spirit", Rarity, Color, Passive }
+BeyConfig.Specials = {} -- id -> { Id, Name, Slot = "Special", Rarity, Color, Kind, Tuning }
+for _, row in ipairs(SPIRIT_ROWS) do
+	BeyConfig.Spirits[row[1]] = { Id = row[1], Name = row[2], Slot = "Spirit", Rarity = row[3], Color = row[4], Passive = row[5] }
+end
+for _, row in ipairs(SPECIAL_ROWS) do
+	BeyConfig.Specials[row[1]] = { Id = row[1], Name = row[2], Slot = "Special", Rarity = row[3], Color = row[4], Kind = row[5], Tuning = row[6] }
+end
+
+-- Everything a player can own, by id (parts, spirits, specials). Each row has .Slot (its kind of slot).
+BeyConfig.Items = {}
+for _, list in ipairs({ BeyConfig.Parts, BeyConfig.Spirits, BeyConfig.Specials }) do
+	for id, item in pairs(list) do
+		assert(BeyConfig.Items[id] == nil, "duplicate item id " .. id)
+		BeyConfig.Items[id] = item
+	end
+end
+
+-- The loadout: equipped slot -> the kind of item it holds. Special1 and Special2 both hold specials (never the same one).
+BeyConfig.LoadoutSlots = { "Layer", "Disc", "Driver", "Spirit", "Special1", "Special2" }
+function BeyConfig.SlotKind(slot)
+	if slot == "Special1" or slot == "Special2" then
+		return "Special"
+	end
+	return slot
+end
+
+-- What a new player owns and has equipped.
+BeyConfig.StarterLoadout = {
+	Layer = BeyConfig.StarterBey.Layer,
+	Disc = BeyConfig.StarterBey.Disc,
+	Driver = BeyConfig.StarterBey.Driver,
+	Spirit = "spirit_emberwolf",
+	Special1 = "special_cometdrive",
+	Special2 = "special_ironshell",
+}
+
 -- A bey at level 1 has half its parts' strength; MaxLevel reaches the full value (grind cap).
 function BeyConfig.LevelMultiplier(level)
 	level = math.clamp(level, 1, BeyConfig.MaxLevel)
@@ -293,6 +353,26 @@ local function validate()
 		if part.Rarity == "UltraLegendary" then
 			assert(total <= top[part.Slot] * BeyConfig.UltraMultiplier + 0.5, part.Id .. ": Ultra Legendary is over +10%")
 			assert(total > top[part.Slot], part.Id .. ": Ultra Legendary is not stronger than Legendary")
+		end
+	end
+	for slot, id in pairs(BeyConfig.StarterLoadout) do
+		local item = BeyConfig.Items[id]
+		assert(item and item.Slot == BeyConfig.SlotKind(slot), "starter loadout: bad " .. slot)
+	end
+	assert(BeyConfig.StarterLoadout.Special1 ~= BeyConfig.StarterLoadout.Special2, "starter specials must differ")
+	for id, sp in pairs(BeyConfig.Specials) do
+		local t = sp.Tuning
+		assert(type(t.Cooldown) == "number" and t.Cooldown > 0, id .. ": no cooldown")
+		if sp.Kind == "dash" then
+			assert(t.DashSpeed and t.Window and t.DamageMul and t.KnockbackMul, id .. ": dash tuning")
+		elseif sp.Kind == "guard" then
+			assert(t.Duration and t.Block and t.KnockbackBlock and t.Block < 1, id .. ": guard tuning")
+		elseif sp.Kind == "heal" then
+			assert(t.Heal and t.Heal > 0 and t.Heal < 1, id .. ": heal tuning")
+		elseif sp.Kind == "quake" then
+			assert(t.Radius and t.Damage and t.Knockback, id .. ": quake tuning")
+		else
+			error(id .. ": unknown special kind " .. tostring(sp.Kind))
 		end
 	end
 	for boxId, box in pairs(BeyConfig.Boxes) do
@@ -865,6 +945,20 @@ GameConfig.Launch = {
 	BoostTime = 4, -- ... fading to nothing over this many seconds
 }
 
+-- Specials and Awakening in battle (per-special numbers live in BeyConfig.Specials; see Core/SpecialsCore.lua).
+GameConfig.Specials = {
+	FirstUseDelay = 2.5, -- seconds after LET IT RIP before specials can be used
+	-- Awakening: a meter that fills during the battle; when full, press R to awaken your spirit (once per battle).
+	MeterMax = 100,
+	MeterPerSecond = 1.0, -- passive fill
+	MeterPerDamageDealt = 2.4, -- per point of spin you knock off the foe
+	MeterPerDamageTaken = 1.6, -- per point you lose to hits (comebacks)
+	AwakenDuration = 10,
+	AwakenAttack = 1.25, -- damage dealt x
+	AwakenDefense = 1.25, -- damage and knockback taken / this
+	AwakenSpeed = 1.1, -- top speed x
+}
+
 GameConfig.Difficulty = {
 	-- Speed: villain top-speed multiplier. Windup: seconds of warning before an attack. Aggression: 0..1 how often it
 	-- attacks when in range. Damage: multiplier on its hits. Reward: multiplier on rewards for beating it.
@@ -878,6 +972,8 @@ GameConfig.Villain = {
 	Id = "rook",
 	Name = "Rook the Grinder",
 	Parts = { Layer = "layer_skyrend", Disc = "disc_bulwarkring", Driver = "driver_spikegrip" }, -- all Uncommon
+	Spirit = "spirit_thornstag",
+	Specials = { "special_cometdrive", "special_quakestomp" },
 	Level = 3,
 	Difficulty = "Normal",
 	-- After this many wins against it, the next rematch uses Hard (shown to the player).
@@ -1126,6 +1222,25 @@ function BattleCore.damage(b, key, amount)
 	local applied = math.min(amount, s.spin)
 	s.spin -= applied
 	return applied
+end
+
+-- Give a side spin back (a heal special), capped at its max. Only while active. Returns the amount applied.
+function BattleCore.heal(b, key, amount)
+	local s = b.sides[key]
+	if b.state ~= "active" or not s or not finite(amount) or amount <= 0 or s.spin <= 0 then
+		return 0
+	end
+	local applied = math.min(amount, s.maxSpin - s.spin)
+	s.spin += applied
+	return applied
+end
+
+-- Changes how fast a side's spin drains (a spirit passive). Before or during the battle.
+function BattleCore.setDrain(b, key, drain)
+	local s = b.sides[key]
+	if s and finite(drain) and drain >= 0 then
+		s.drain = drain
+	end
 end
 
 -- Mark a side as rung out (resolved on the next update, so a double ring-out in one step is a draw).
@@ -1779,13 +1894,14 @@ return MovementCore
 install('RS', 'Core', 'ModuleScript', 'PlayerData', [=====[
 --!nonstrict
 -- PlayerData: the versioned save format, migration from older versions, and repair of bad values. Pure.
--- Version 1 fields:
---   Version, XP, Shards, Owned {partId = true}, Equipped {Layer, Disc, Driver}, Record {Wins, Losses, Draws},
+-- Version 2 fields (v1 had no Spirit/Special1/Special2; migrating fills them from the starter loadout):
+--   Version, XP, Shards, Owned {itemId = true}, Equipped {Layer, Disc, Driver, Spirit, Special1, Special2},
+--   Record {Wins, Losses, Draws},
 --   RecentBattles {battleId...} (refuses duplicate rewards), Settings {CameraShake, ReducedEffects, TutorialDone}
 -- A save written by a NEWER version is never migrated or overwritten (migrate returns nil, "newer").
 
 local PlayerData = {}
-PlayerData.VERSION = 1
+PlayerData.VERSION = 2
 
 local function finite(n)
 	return type(n) == "number" and n == n and n ~= math.huge and n ~= -math.huge
@@ -1795,7 +1911,16 @@ local function count(n)
 	return finite(n) and n >= 0 and math.floor(n) or 0
 end
 
--- starter: { Layer = id, Disc = id, Driver = id }
+-- What kind of item an equipped slot holds (Special1 and Special2 both hold specials).
+local function slotKind(slot)
+	if slot == "Special1" or slot == "Special2" then
+		return "Special"
+	end
+	return slot
+end
+PlayerData.slotKind = slotKind
+
+-- starter: the starting loadout { Layer, Disc, Driver, Spirit, Special1, Special2 } (item ids)
 function PlayerData.new(starter)
 	local owned = {}
 	for _, id in pairs(starter) do
@@ -1806,15 +1931,15 @@ function PlayerData.new(starter)
 		XP = 0,
 		Shards = 0,
 		Owned = owned,
-		Equipped = { Layer = starter.Layer, Disc = starter.Disc, Driver = starter.Driver },
+		Equipped = table.clone(starter),
 		Record = { Wins = 0, Losses = 0, Draws = 0 },
 		RecentBattles = {},
 		Settings = { CameraShake = true, ReducedEffects = false, TutorialDone = false },
 	}
 end
 
--- Repair a v1 table in place: unknown parts dropped, starter parts always owned, equipped parts owned and in the
--- right slot (else the starter part), counters non-negative integers, settings booleans.
+-- Repair a table in place: unknown items dropped, starter items always owned, equipped items owned and of the
+-- right kind (else the starter item), the two specials different, counters non-negative integers, settings booleans.
 local function repair(d, starter, parts, recentMax)
 	d.XP = count(d.XP)
 	d.Shards = count(d.Shards)
@@ -1834,11 +1959,14 @@ local function repair(d, starter, parts, recentMax)
 	local fixed = {}
 	for slot, starterId in pairs(starter) do
 		local id = eq[slot]
-		if type(id) == "string" and owned[id] and parts[id] and parts[id].Slot == slot then
+		if type(id) == "string" and owned[id] and parts[id] and parts[id].Slot == slotKind(slot) then
 			fixed[slot] = id
 		else
 			fixed[slot] = starterId
 		end
+	end
+	if fixed.Special1 and fixed.Special1 == fixed.Special2 then
+		fixed.Special2 = fixed.Special1 == starter.Special2 and starter.Special1 or starter.Special2
 	end
 	d.Equipped = fixed
 	local rec = type(d.Record) == "table" and d.Record or {}
@@ -1915,7 +2043,7 @@ function PlayerData.snapshot(d, level, saveStatus)
 		Level = level,
 		Shards = d.Shards,
 		Owned = owned,
-		Equipped = { Layer = d.Equipped.Layer, Disc = d.Equipped.Disc, Driver = d.Equipped.Driver },
+		Equipped = table.clone(d.Equipped),
 		Record = { Wins = d.Record.Wins, Losses = d.Record.Losses, Draws = d.Record.Draws },
 		Settings = { CameraShake = d.Settings.CameraShake, ReducedEffects = d.Settings.ReducedEffects, TutorialDone = d.Settings.TutorialDone },
 		SaveStatus = saveStatus,
@@ -2024,8 +2152,10 @@ function Progression.buy(data, partId, parts, P, inBattle)
 	return true, cost
 end
 
--- Equip an owned part into its own slot. Never during a battle.
-function Progression.equip(data, partId, parts, inBattle)
+-- Equip an owned item into its slot. Never during a battle. parts = BeyConfig.Items (parts, spirits, specials).
+-- Specials have two slots: `slot` picks "Special1" or "Special2" (default Special1). Equipping the special that is
+-- already in the other slot swaps the two.
+function Progression.equip(data, partId, parts, inBattle, slot)
 	if inBattle then
 		return false, "in_battle"
 	end
@@ -2035,6 +2165,15 @@ function Progression.equip(data, partId, parts, inBattle)
 	end
 	if not data.Owned[partId] then
 		return false, "not_owned"
+	end
+	if part.Slot == "Special" then
+		slot = (slot == "Special2") and "Special2" or "Special1"
+		local other = slot == "Special1" and "Special2" or "Special1"
+		if data.Equipped[other] == partId then
+			data.Equipped[other] = data.Equipped[slot]
+		end
+		data.Equipped[slot] = partId
+		return true
 	end
 	data.Equipped[part.Slot] = partId
 	return true
@@ -2138,6 +2277,197 @@ end
 
 return SessionStore
 ]=====])
+install('RS', 'Core', 'ModuleScript', 'SpecialsCore', [=====[
+--!nonstrict
+-- SpecialsCore: special moves, spirit passives and Awakening for one side of a battle, as pure functions.
+-- The server's BattleService owns one state per side and asks it for multipliers when hits land.
+--   specials   two slots with cooldowns. dash: the mover bursts forward and the NEXT hit within Window deals
+--              DamageMul / KnockbackMul. guard: for Duration, damage taken x(1-Block), knockback x(1-KnockbackBlock).
+--              heal: get Heal of max spin back. quake: the server hits the foe if within Radius.
+--   spirit     always-on multipliers (Attack, Defense, Speed, Drain) from BeyConfig.Spirits[..].Passive
+--   awakening  a meter (passive + damage dealt/taken); when full the side may awaken once: Attack/Defense/Speed up
+--              for AwakenDuration.
+-- items = BeyConfig.Items, A = GameConfig.Specials. Tested in tools/tests/specials.test.luau.
+
+local SpecialsCore = {}
+
+local function finite(n)
+	return type(n) == "number" and n == n and n ~= math.huge and n ~= -math.huge
+end
+
+-- loadout: { Spirit = id, Special1 = id, Special2 = id } (unknown ids are ignored: that slot does nothing).
+function SpecialsCore.newSide(loadout, items)
+	local function special(id)
+		local it = items[id]
+		return { id = id, def = (it and it.Slot == "Special") and it or nil, readyAt = math.huge }
+	end
+	local spirit = items[loadout.Spirit]
+	return {
+		specials = { special(loadout.Special1), special(loadout.Special2) },
+		spirit = (spirit and spirit.Slot == "Spirit") and spirit or nil,
+		meter = 0,
+		awakenUsed = false,
+		awakenedUntil = -math.huge,
+		guard = nil, -- { untilT, block, knockbackBlock }
+		empower = nil, -- { untilT, damage, knockback }
+	}
+end
+
+-- Battle started: specials unlock after FirstUseDelay.
+function SpecialsCore.start(side, now, A)
+	for _, s in ipairs(side.specials) do
+		s.readyAt = now + A.FirstUseDelay
+	end
+end
+
+function SpecialsCore.cooldownLeft(side, index, now)
+	local s = side.specials[index]
+	if not s then
+		return math.huge
+	end
+	return math.max(s.readyAt - now, 0)
+end
+
+function SpecialsCore.canUse(side, index, now)
+	local s = side.specials[index]
+	if not s or not s.def then
+		return false, "unknown"
+	end
+	if now < s.readyAt then
+		return false, "cooldown"
+	end
+	return true
+end
+
+-- Uses special `index`. Returns the special's definition (the caller applies dash/heal/quake), or nil + reason.
+-- dash and guard set their timed effect here.
+function SpecialsCore.use(side, index, now)
+	local ok, reason = SpecialsCore.canUse(side, index, now)
+	if not ok then
+		return nil, reason
+	end
+	local s = side.specials[index]
+	local def, t = s.def, s.def.Tuning
+	s.readyAt = now + t.Cooldown
+	if def.Kind == "dash" then
+		side.empower = { untilT = now + t.Window, damage = t.DamageMul, knockback = t.KnockbackMul }
+	elseif def.Kind == "guard" then
+		side.guard = { untilT = now + t.Duration, block = t.Block, knockbackBlock = t.KnockbackBlock }
+	end
+	return def
+end
+
+-------------------------------------------------------------------------------- awakening
+
+function SpecialsCore.isAwakened(side, now)
+	return now < side.awakenedUntil
+end
+
+-- Adds to the Awakening meter (not while awakened, not after it was used).
+function SpecialsCore.charge(side, amount, A)
+	if side.awakenUsed or not finite(amount) or amount <= 0 then
+		return
+	end
+	side.meter = math.min(side.meter + amount, A.MeterMax)
+end
+
+function SpecialsCore.tick(side, dt, A)
+	if finite(dt) and dt > 0 then
+		SpecialsCore.charge(side, A.MeterPerSecond * math.min(dt, 0.5), A)
+	end
+end
+
+function SpecialsCore.meterFraction(side, A)
+	return side.awakenUsed and 0 or side.meter / A.MeterMax
+end
+
+function SpecialsCore.canAwaken(side, A)
+	return not side.awakenUsed and side.meter >= A.MeterMax
+end
+
+-- Awakens once per battle when the meter is full. Returns true if it happened.
+function SpecialsCore.awaken(side, now, A)
+	if not SpecialsCore.canAwaken(side, A) then
+		return false
+	end
+	side.awakenUsed = true
+	side.meter = 0
+	side.awakenedUntil = now + A.AwakenDuration
+	return true
+end
+
+-------------------------------------------------------------------------------- multipliers
+
+local function passive(side, key)
+	local p = side.spirit and side.spirit.Passive
+	local v = p and p[key]
+	return finite(v) and v > 0 and v or 1
+end
+
+-- Multipliers on damage and knockback this side DEALS. consume = true uses up a dash's empowered hit.
+function SpecialsCore.outgoing(side, now, A, consume)
+	local dmg = passive(side, "Attack")
+	local kb = 1
+	if SpecialsCore.isAwakened(side, now) then
+		dmg *= A.AwakenAttack
+	end
+	local e = side.empower
+	if e then
+		if now <= e.untilT then
+			dmg *= e.damage
+			kb *= e.knockback
+			if consume then
+				side.empower = nil
+			end
+		else
+			side.empower = nil
+		end
+	end
+	return dmg, kb
+end
+
+-- Multipliers on damage and knockback this side TAKES.
+function SpecialsCore.incoming(side, now, A)
+	local def = passive(side, "Defense")
+	if SpecialsCore.isAwakened(side, now) then
+		def *= A.AwakenDefense
+	end
+	local dmg, kb = 1 / def, 1 / def
+	local g = side.guard
+	if g then
+		if now <= g.untilT then
+			dmg *= 1 - g.block
+			kb *= 1 - g.knockbackBlock
+		else
+			side.guard = nil
+		end
+	end
+	return dmg, kb
+end
+
+function SpecialsCore.speed(side, now, A)
+	local m = passive(side, "Speed")
+	if SpecialsCore.isAwakened(side, now) then
+		m *= A.AwakenSpeed
+	end
+	return m
+end
+
+function SpecialsCore.drain(side)
+	return passive(side, "Drain")
+end
+
+-- A compact view for the client HUD.
+function SpecialsCore.snapshot(side, now, A)
+	local out = { meter = SpecialsCore.meterFraction(side, A), awakened = SpecialsCore.isAwakened(side, now), awakenUsed = side.awakenUsed, specials = {} }
+	for i, s in ipairs(side.specials) do
+		out.specials[i] = { id = s.id, left = SpecialsCore.cooldownLeft(side, i, now), cooldown = s.def and s.def.Tuning.Cooldown or 0 }
+	end
+	return out
+end
+
+return SpecialsCore
+]=====])
 install('SSS', '', 'ModuleScript', 'BattleService', [=====[
 --!nonstrict
 -- BattleService: the player-vs-villain battle in the Arena. The SERVER owns spin, hits, outcomes and rewards.
@@ -2145,7 +2475,8 @@ install('SSS', '', 'ModuleScript', 'BattleService', [=====[
 --   -> result screen (Rematch / Leave, or it closes itself) -> cleanup (beys removed, avatar restored)
 -- What the server trusts from the client: only the player's bey position/velocity (client-owned physics, which a
 -- cheater could fake), a bare "my slam landed" signal (checked against the fall the server observed), and the time
--- the player pressed LAUNCH (checked against the meter's window; the server judges the timing itself).
+-- the player pressed LAUNCH (checked against the meter's window; the server judges the timing itself), and
+-- "use special 1/2" / "awaken" requests (the server checks the loadout, cooldowns and meter; see SpecialsCore).
 -- Clients never send damage, results, XP or Shards. See HANDOFF.md "Residual exploit exposure".
 
 local Players = game:GetService("Players")
@@ -2160,6 +2491,8 @@ local CombatCore = require(Shared.Core.CombatCore)
 local BattleCore = require(Shared.Core.BattleCore)
 local Progression = require(Shared.Core.Progression)
 local LaunchCore = require(Shared.Core.LaunchCore)
+local SpecialsCore = require(Shared.Core.SpecialsCore)
+local BeyConfig = require(Shared.BeyConfig)
 
 local BeyFactory = require(script.Parent.BeyFactory)
 local BeyService = require(script.Parent.BeyService)
@@ -2167,7 +2500,8 @@ local DataService = require(script.Parent.DataService)
 local VillainAI = require(script.Parent.VillainAI)
 local World = require(script.Parent.World)
 
-local C, B, V, P, L = GameConfig.Combat, GameConfig.Battle, GameConfig.Villain, GameConfig.Progression, GameConfig.Launch
+local C, B, V, P, L, A = GameConfig.Combat, GameConfig.Battle, GameConfig.Villain, GameConfig.Progression, GameConfig.Launch, GameConfig.Specials
+local SNAPSHOT_EVERY = 0.2 -- seconds between specials/awakening HUD updates sent to the player
 
 local BattleService = {}
 
@@ -2342,11 +2676,21 @@ startBattle = function(player)
 		-- Skill launch: the meter runs on the shared server clock during the countdown.
 		meter = LaunchCore.newMeter(Workspace:GetServerTimeNow(), B.Countdown, Random.new():NextNumber(), L),
 		launch = {}, -- side -> { quality, label }
+		snapshotAt = 0,
 	}
+	local equipped = (DataService.get(player) or {}).Equipped or BeyConfig.StarterLoadout
+	rec.specials = {
+		player = SpecialsCore.newSide(equipped, BeyConfig.Items),
+		villain = SpecialsCore.newSide({ Spirit = V.Spirit, Special1 = V.Specials[1], Special2 = V.Specials[2] }, BeyConfig.Items),
+	}
+	rec.spirits = { player = equipped.Spirit, villain = V.Spirit }
 	rec.battle = BattleCore.new(rec.id, {
 		{ key = "player", maxSpin = mine.maxSpin, drain = CombatCore.drainPerSecond(mine.stats, C) },
 		{ key = "villain", maxSpin = villain.maxSpin, drain = CombatCore.drainPerSecond(villain.stats, C) },
 	}, B, now)
+	for key, side in pairs(rec.specials) do
+		BattleCore.setDrain(rec.battle, key, rec.battle.sides[key].drain * SpecialsCore.drain(side))
+	end
 	rec.ai = VillainAI.new(villain, diff, center, { BeyService.folder() })
 	-- The villain's launch is decided now (its skill depends on difficulty).
 	local vq = LaunchCore.villainQuality(diff.Launch or 0.7, Random.new():NextNumber())
@@ -2361,6 +2705,8 @@ startBattle = function(player)
 		seconds = B.Countdown,
 		foe = V.Name,
 		difficulty = difficulty,
+		loadout = { spirit = equipped.Spirit, specials = { equipped.Special1, equipped.Special2 } },
+		foeLoadout = { spirit = V.Spirit, specials = V.Specials },
 		meter = { start = m.start, finish = m.finish, period = m.period, zoneCenter = m.zoneCenter, greenHalf = m.greenHalf, yellowHalf = m.yellowHalf },
 	})
 end
@@ -2378,27 +2724,52 @@ local function resolveContact(rec, now)
 	if not n or closing <= C.MinImpactSpeed then
 		return
 	end
-	local dealt = CombatCore.hitDamage(rec.mine.stats, rec.villain.stats, closing, share, C)
-	local taken = CombatCore.hitDamage(rec.villain.stats, rec.mine.stats, closing, 1 - share, C) * rec.diff.Damage
+	local sp, sv = rec.specials.player, rec.specials.villain
+	local pEmpowered = sp.empower ~= nil and now <= sp.empower.untilT
+	local vEmpowered = sv.empower ~= nil and now <= sv.empower.untilT
+	local pOut, pKbOut = SpecialsCore.outgoing(sp, now, A, true)
+	local vOut, vKbOut = SpecialsCore.outgoing(sv, now, A, true)
+	local pIn, pKbIn = SpecialsCore.incoming(sp, now, A)
+	local vIn, vKbIn = SpecialsCore.incoming(sv, now, A)
+	local dealt = CombatCore.hitDamage(rec.mine.stats, rec.villain.stats, closing, share, C) * pOut * vIn
+	local taken = CombatCore.hitDamage(rec.villain.stats, rec.mine.stats, closing, 1 - share, C) * rec.diff.Damage * vOut * pIn
 	dealt = BattleCore.damage(rec.battle, "villain", dealt)
 	taken = BattleCore.damage(rec.battle, "player", taken)
-	local kbVillain = CombatCore.knockback(rec.mine.stats, rec.villain.stats, closing, C)
-	local kbPlayer = CombatCore.knockback(rec.villain.stats, rec.mine.stats, closing, C)
+	SpecialsCore.charge(sp, dealt * A.MeterPerDamageDealt + taken * A.MeterPerDamageTaken, A)
+	SpecialsCore.charge(sv, taken * A.MeterPerDamageDealt + dealt * A.MeterPerDamageTaken, A)
+	local kbVillain = math.min(CombatCore.knockback(rec.mine.stats, rec.villain.stats, closing, C) * pKbOut * vKbIn, C.MaxKnockback * 2)
+	local kbPlayer = math.min(CombatCore.knockback(rec.villain.stats, rec.mine.stats, closing, C) * vKbOut * pKbIn, C.MaxKnockback * 2)
 	vb.AssemblyLinearVelocity += (n + Vector3.new(0, 0.25, 0)).Unit * kbVillain
 	remotes.Knockback:FireClient(rec.player, (-n + Vector3.new(0, 0.25, 0)).Unit * kbPlayer)
 	rec.ai:onHit(now)
-	send(rec.player, { kind = "hit", dealt = dealt, taken = taken, at = (pPos + vPos) / 2, strength = math.clamp(closing / 60, 0.2, 1) })
+	local strength = math.clamp(closing / 60, 0.2, 1)
+	if pEmpowered or vEmpowered then
+		strength = 1
+	end
+	send(rec.player, {
+		kind = "hit",
+		dealt = dealt,
+		taken = taken,
+		at = (pPos + vPos) / 2,
+		normal = n,
+		strength = strength,
+		crit = pEmpowered or nil,
+		foeCrit = vEmpowered or nil,
+	})
 end
 
 -- The player's slam landed (already validated by BeyService against the observed fall).
 local function playerSlam(rec, fall, now)
 	local pPos, vPos = rec.mine.body.Position, rec.villain.body.Position
 	local d = Vector3.new(vPos.X - pPos.X, 0, vPos.Z - pPos.Z)
-	local dmg = CombatCore.slamDamage(rec.mine.stats, rec.villain.stats, fall, d.Magnitude, C)
+	local pOut = SpecialsCore.outgoing(rec.specials.player, now, A, false)
+	local vIn = SpecialsCore.incoming(rec.specials.villain, now, A)
+	local dmg = CombatCore.slamDamage(rec.mine.stats, rec.villain.stats, fall, d.Magnitude, C) * pOut * vIn
 	local recoil = BattleCore.damage(rec.battle, "player", CombatCore.slamRecoil(rec.mine.stats, C))
 	local dealt = 0
 	if dmg > 0 then
 		dealt = BattleCore.damage(rec.battle, "villain", dmg)
+		SpecialsCore.charge(rec.specials.player, dealt * A.MeterPerDamageDealt, A)
 		local dir = (d.Magnitude > 0.01 and d.Unit or Vector3.new(0, 0, -1)) + Vector3.new(0, 0.6, 0)
 		rec.villain.body.AssemblyLinearVelocity += dir.Unit * C.SlamKnockback
 		rec.ai:onHit(now)
@@ -2413,14 +2784,89 @@ local function villainSlam(rec, fallSeen, now)
 	local fall = math.max(fallSeen, CombatCore.maxFall(rec.villainFall, now, C.SlamFallWindow))
 	local pPos, vPos = rec.mine.body.Position, rec.villain.body.Position
 	local d = Vector3.new(pPos.X - vPos.X, 0, pPos.Z - vPos.Z)
-	local dmg = CombatCore.slamDamage(rec.villain.stats, rec.mine.stats, fall, d.Magnitude, C) * rec.diff.Damage
+	local vOut = SpecialsCore.outgoing(rec.specials.villain, now, A, false)
+	local pIn = SpecialsCore.incoming(rec.specials.player, now, A)
+	local dmg = CombatCore.slamDamage(rec.villain.stats, rec.mine.stats, fall, d.Magnitude, C) * rec.diff.Damage * vOut * pIn
 	if dmg > 0 then
 		local taken = BattleCore.damage(rec.battle, "player", dmg)
+		SpecialsCore.charge(rec.specials.player, taken * A.MeterPerDamageTaken, A)
+		SpecialsCore.charge(rec.specials.villain, taken * A.MeterPerDamageDealt, A)
 		local dir = (d.Magnitude > 0.01 and d.Unit or Vector3.new(0, 0, 1)) + Vector3.new(0, 0.6, 0)
 		remotes.Knockback:FireClient(rec.player, dir.Unit * C.SlamKnockback)
 		send(rec.player, { kind = "hit", dealt = 0, taken = taken, at = pPos, strength = 1, slam = true })
 	end
 	send(rec.player, { kind = "villainSlam", at = vPos })
+end
+
+-- Uses special `index` for `who` ("player" | "villain"). The server applies everything except the player's own dash
+-- burst, which the player's client applies to its bey (client-owned physics). Returns true if it was used.
+local function useSpecial(rec, who, index, now)
+	local b = rec.battle
+	if b.state ~= "active" then
+		return false
+	end
+	local side = rec.specials[who]
+	local def = SpecialsCore.use(side, index, now)
+	if not def then
+		return false
+	end
+	local foeKey = who == "player" and "villain" or "player"
+	local selfBody = who == "player" and rec.mine.body or rec.villain.body
+	local foeBody = who == "player" and rec.villain.body or rec.mine.body
+	local t = def.Tuning
+	local toFoe = Vector3.new(foeBody.Position.X - selfBody.Position.X, 0, foeBody.Position.Z - selfBody.Position.Z)
+	local dir = toFoe.Magnitude > 0.1 and toFoe.Unit or Vector3.new(0, 0, -1)
+	local ev = { kind = "special", who = who, id = def.Id, special = def.Kind, spirit = rec.spirits[who], at = selfBody.Position, dir = dir }
+	if def.Kind == "dash" then
+		ev.dash = t.DashSpeed
+		if who == "villain" then
+			selfBody.AssemblyLinearVelocity = Vector3.new(dir.X * t.DashSpeed, selfBody.AssemblyLinearVelocity.Y, dir.Z * t.DashSpeed)
+		end
+	end
+	if (def.Kind == "heal" or def.Kind == "guard") and t.Heal then
+		ev.healed = BattleCore.heal(b, who, b.sides[who].maxSpin * t.Heal)
+	end
+	if def.Kind == "quake" then
+		local dist = toFoe.Magnitude
+		if dist <= t.Radius then
+			local out = SpecialsCore.outgoing(side, now, A, false)
+			local inc, kbIn = SpecialsCore.incoming(rec.specials[foeKey], now, A)
+			local falloff = 1 - 0.4 * (dist / t.Radius)
+			local dmg = t.Damage * falloff * out * inc * (who == "villain" and rec.diff.Damage or 1)
+			local applied = BattleCore.damage(b, foeKey, dmg)
+			ev.hit, ev.dealt = true, applied
+			SpecialsCore.charge(side, applied * A.MeterPerDamageDealt, A)
+			SpecialsCore.charge(rec.specials[foeKey], applied * A.MeterPerDamageTaken, A)
+			local push = (dir + Vector3.new(0, 0.5, 0)).Unit * t.Knockback * kbIn
+			if foeKey == "villain" then
+				rec.villain.body.AssemblyLinearVelocity += push
+				rec.ai:onHit(now)
+			else
+				remotes.Knockback:FireClient(rec.player, push)
+			end
+		end
+	end
+	send(rec.player, ev)
+	return true
+end
+
+local function awaken(rec, who, now)
+	if rec.battle.state ~= "active" or not SpecialsCore.awaken(rec.specials[who], now, A) then
+		return false
+	end
+	local body = who == "player" and rec.mine.body or rec.villain.body
+	send(rec.player, { kind = "awaken", who = who, spirit = rec.spirits[who], at = body.Position, duration = A.AwakenDuration })
+	return true
+end
+
+local function sendSnapshot(rec, now)
+	if now - rec.snapshotAt < SNAPSHOT_EVERY then
+		return
+	end
+	rec.snapshotAt = now
+	local you = SpecialsCore.snapshot(rec.specials.player, now, A)
+	you.speed = SpecialsCore.speed(rec.specials.player, now, A)
+	send(rec.player, { kind = "specials", you = you, foe = SpecialsCore.snapshot(rec.specials.villain, now, A) })
 end
 
 local function step(dt)
@@ -2460,6 +2906,8 @@ local function step(dt)
 				rec.villain.body.AssemblyLinearVelocity = toPlayer.Unit * ve.speed
 			end
 			rec.ai:launched(ve.boost, now)
+			SpecialsCore.start(rec.specials.player, now, A)
+			SpecialsCore.start(rec.specials.villain, now, A)
 			local pe = LaunchCore.effects(pl.quality, L)
 			setBattleAttrs(player, "active", Workspace:GetServerTimeNow() + B.Duration)
 			send(player, {
@@ -2487,11 +2935,27 @@ local function step(dt)
 		if CombatCore.ringOutStep(rec.outTimers, "villain", rec.villain.body.Position - center, now, B) then
 			BattleCore.ringOut(b, "villain")
 		end
+		SpecialsCore.tick(rec.specials.player, dt, A)
+		SpecialsCore.tick(rec.specials.villain, dt, A)
 		resolveContact(rec, now)
 		local mine = rec.mine.body
+		rec.ai.speedMul = SpecialsCore.speed(rec.specials.villain, now, A)
 		rec.ai:step(dt, now, { pos = mine.Position, vel = mine.AssemblyLinearVelocity }, BattleCore.fraction(b, "villain"), function(fall)
 			villainSlam(rec, fall, now)
 		end)
+		-- the villain's specials and awakening
+		local choice = rec.ai:chooseSpecial(now, {
+			specials = rec.specials.villain,
+			foe = rec.specials.player,
+			canAwaken = SpecialsCore.canAwaken(rec.specials.villain, A),
+			spin = BattleCore.fraction(b, "villain"),
+		})
+		if choice == "awaken" then
+			awaken(rec, "villain", now)
+		elseif choice then
+			useSpecial(rec, "villain", choice, now)
+		end
+		sendSnapshot(rec, now)
 		-- a knockout this frame is resolved on the next update()
 	elseif rec.ai then
 		rec.ai:idle(dt)
@@ -2556,6 +3020,12 @@ function BattleService.start(r)
 			rec.launch.player = { quality = q, label = label }
 			BattleCore.setStartSpin(rec.battle, "player", LaunchCore.effects(q, L).spinFraction)
 			send(player, { kind = "launchLocked", label = label, quality = q })
+		elseif req.action == "special" and mine and (req.index == 1 or req.index == 2) then
+			if not useSpecial(rec, "player", req.index, os.clock()) then
+				send(player, { kind = "specialRefused", index = req.index })
+			end
+		elseif req.action == "awaken" and mine then
+			awaken(rec, "player", os.clock())
 		elseif req.action == "rematch" and mine and rec.battle.state == "finished" then
 			BattleCore.requestCleanup(rec.battle, os.clock())
 			cleanup(rec, true)
@@ -3031,7 +3501,7 @@ local function keyFor(player)
 end
 
 local function migrate(raw)
-	return PlayerData.migrate(raw, BeyConfig.StarterBey, BeyConfig.Parts, P.RecentBattleMemory)
+	return PlayerData.migrate(raw, BeyConfig.StarterLoadout, BeyConfig.Items, P.RecentBattleMemory)
 end
 
 local function sessionOpts()
@@ -3144,7 +3614,7 @@ local function load(player)
 	end
 	if status ~= "saving" then
 		warn(("Spinforge: %s plays with a temporary profile (%s: %s). It will NOT be saved."):format(player.Name, status, tostring(detail)))
-		data = PlayerData.new(BeyConfig.StarterBey)
+		data = PlayerData.new(BeyConfig.StarterLoadout)
 	end
 	profiles[player] = { data = data, status = status, dirty = false }
 	player:SetAttribute("DataReady", true)
@@ -3279,7 +3749,7 @@ if world.prompts.workshop then
 	end)
 end
 
--- Workshop: buy and equip, validated on the server. Changing parts is only allowed on foot.
+-- Workshop: buy and equip parts, spirits and specials, validated on the server. Only allowed on foot.
 remotes.Workshop.OnServerInvoke = function(player, req)
 	local data = DataService.get(player)
 	local function reply(ok, reason)
@@ -3302,9 +3772,10 @@ remotes.Workshop.OnServerInvoke = function(player, req)
 	local inBattle = mode ~= "OnFoot"
 	local ok, reason
 	if req.action == "buy" then
-		ok, reason = Progression.buy(data, req.part, BeyConfig.Parts, GameConfig.Progression, inBattle)
+		ok, reason = Progression.buy(data, req.part, BeyConfig.Items, GameConfig.Progression, inBattle)
 	elseif req.action == "equip" then
-		ok, reason = Progression.equip(data, req.part, BeyConfig.Parts, inBattle)
+		local slot = (req.slot == "Special1" or req.slot == "Special2") and req.slot or nil
+		ok, reason = Progression.equip(data, req.part, BeyConfig.Items, inBattle, slot)
 	else
 		return reply(false, "invalid")
 	end
@@ -3404,6 +3875,9 @@ install('SSS', '', 'ModuleScript', 'VillainAI', [=====[
 --   slamWindup   TELEGRAPH (orange highlight + "!!"): hops, then dives onto the player (an air slam)
 --   recover      backs off at an angle for a moment after an attack or a hit
 --   unstuck      if it barely moves for a while, it pushes back toward the centre
+-- Specials (chooseSpecial, asked by BattleService each frame): a dash special fires as a dash attack starts, a quake
+-- when the player is close, a guard when the player is empowered or awakened, a heal when low; it awakens as soon
+-- as its meter is full. Never more than one special per SPECIAL_GAP seconds, so the player can read them.
 -- Difficulty (GameConfig.Difficulty) sets speed, warning time, aggression and damage.
 -- Unverified in Roblox: how this feels and whether it gets stuck on the stadium geometry. See HANDOFF checklist.
 
@@ -3420,6 +3894,7 @@ local M = BeyConfig.Movement
 local VillainAI = {}
 VillainAI.__index = VillainAI
 
+local SPECIAL_GAP = 2.5 -- minimum seconds between the villain's specials
 local RIM_SAFE = 31 -- beyond this radius (from the arena centre) it steers back in unless attacking
 
 -- rec: BeyFactory record. diff: GameConfig.Difficulty entry. center: arena centre. ignore: instances the probe ignores.
@@ -3438,6 +3913,9 @@ function VillainAI.new(rec, diff, center, ignore)
 	self.yaw = 0
 	self.up = Vector3.yAxis
 	self.dashTarget = nil
+	self.speedMul = 1 -- spirit passive / awakening (set by BattleService)
+	self.dashStartedAt = -math.huge
+	self.lastSpecialAt = -math.huge
 	self.rng = Random.new()
 	self.params = RaycastParams.new()
 	self.params.FilterType = Enum.RaycastFilterType.Exclude
@@ -3514,7 +3992,7 @@ function VillainAI:step(dt, now, target, spinFraction, onSlamImpact)
 	dt = MC.safeDt(dt, M)
 	local pos = body.Position
 	local vel = MC.sanitizeVelocity(body.AssemblyLinearVelocity, M)
-	local speed = MC.topSpeed(self.rec.stats, M) * self.diff.Speed
+	local speed = MC.topSpeed(self.rec.stats, M) * self.diff.Speed * (self.speedMul or 1)
 	if self.launchAt then
 		speed *= LaunchCore.boostMultiplier(self.launchBoost, now - self.launchAt, GameConfig.Launch)
 	end
@@ -3532,6 +4010,7 @@ function VillainAI:step(dt, now, target, spinFraction, onSlamImpact)
 
 	local toTarget = flat(target.pos - pos)
 	local dist = toTarget.Magnitude
+	self.lastDist = dist
 	local fromCenter = flat(pos - self.center)
 	local wish, tilt = Vector3.zero, 0
 	local t = now - self.stateAt
@@ -3561,6 +4040,7 @@ function VillainAI:step(dt, now, target, spinFraction, onSlamImpact)
 		tilt = 0.7 -- visibly rears back and slows: the tell
 		if t >= self.diff.Windup then
 			self.dashTarget = target.pos
+			self.dashStartedAt = now
 			self:go("dash", now)
 		end
 	elseif s == "dash" then
@@ -3651,6 +4131,40 @@ function VillainAI:step(dt, now, target, spinFraction, onSlamImpact)
 		wobble = math.sin(now * 9) * 0.25 * (1 - spinFraction / GameConfig.Combat.LowSpinFraction)
 	end
 	self.rec.align.CFrame = CFrame.fromMatrix(Vector3.zero, r, u, b) * CFrame.Angles(tilt * math.rad(M.MaxTiltDeg) * 0.6, 0, wobble)
+end
+
+-- Which special to use now, if any: 1 or 2 (slot), "awaken", or nil.
+-- info = { specials = its SpecialsCore side, foe = the player's side, canAwaken = bool, spin = its spin fraction }
+function VillainAI:chooseSpecial(now, info)
+	if now - self.lastSpecialAt < SPECIAL_GAP then
+		return nil
+	end
+	local function pick(choice)
+		self.lastSpecialAt = now
+		return choice
+	end
+	if info.canAwaken then
+		return pick("awaken")
+	end
+	local dist = self.lastDist or math.huge
+	local foe = info.foe
+	local threatened = (foe.empower ~= nil and now <= foe.empower.untilT) or now < foe.awakenedUntil
+	for i, s in ipairs(info.specials.specials) do
+		local def = s.def
+		if def and now >= s.readyAt then
+			local kind, t = def.Kind, def.Tuning
+			if kind == "dash" and self.state == "dash" and now - self.dashStartedAt < 0.15 then
+				return pick(i)
+			elseif kind == "quake" and dist < t.Radius * 0.8 and self.rng:NextNumber() < self.diff.Aggression * 0.05 then
+				return pick(i)
+			elseif kind == "guard" and threatened and dist < 18 then
+				return pick(i)
+			elseif kind == "heal" and info.spin < 0.4 then
+				return pick(i)
+			end
+		end
+	end
+	return nil
 end
 
 -- A hit lands on the villain: interrupt a windup sometimes and back off.
@@ -5836,4 +6350,4 @@ end
 
 return Ui
 ]=====])
-print('Spinforge installed: 29 scripts. Press Play.')
+print('Spinforge installed: 30 scripts. Press Play.')

@@ -7,6 +7,9 @@
 --   slamWindup   TELEGRAPH (orange highlight + "!!"): hops, then dives onto the player (an air slam)
 --   recover      backs off at an angle for a moment after an attack or a hit
 --   unstuck      if it barely moves for a while, it pushes back toward the centre
+-- Specials (chooseSpecial, asked by BattleService each frame): a dash special fires as a dash attack starts, a quake
+-- when the player is close, a guard when the player is empowered or awakened, a heal when low; it awakens as soon
+-- as its meter is full. Never more than one special per SPECIAL_GAP seconds, so the player can read them.
 -- Difficulty (GameConfig.Difficulty) sets speed, warning time, aggression and damage.
 -- Unverified in Roblox: how this feels and whether it gets stuck on the stadium geometry. See HANDOFF checklist.
 
@@ -23,6 +26,7 @@ local M = BeyConfig.Movement
 local VillainAI = {}
 VillainAI.__index = VillainAI
 
+local SPECIAL_GAP = 2.5 -- minimum seconds between the villain's specials
 local RIM_SAFE = 31 -- beyond this radius (from the arena centre) it steers back in unless attacking
 
 -- rec: BeyFactory record. diff: GameConfig.Difficulty entry. center: arena centre. ignore: instances the probe ignores.
@@ -41,6 +45,9 @@ function VillainAI.new(rec, diff, center, ignore)
 	self.yaw = 0
 	self.up = Vector3.yAxis
 	self.dashTarget = nil
+	self.speedMul = 1 -- spirit passive / awakening (set by BattleService)
+	self.dashStartedAt = -math.huge
+	self.lastSpecialAt = -math.huge
 	self.rng = Random.new()
 	self.params = RaycastParams.new()
 	self.params.FilterType = Enum.RaycastFilterType.Exclude
@@ -117,7 +124,7 @@ function VillainAI:step(dt, now, target, spinFraction, onSlamImpact)
 	dt = MC.safeDt(dt, M)
 	local pos = body.Position
 	local vel = MC.sanitizeVelocity(body.AssemblyLinearVelocity, M)
-	local speed = MC.topSpeed(self.rec.stats, M) * self.diff.Speed
+	local speed = MC.topSpeed(self.rec.stats, M) * self.diff.Speed * (self.speedMul or 1)
 	if self.launchAt then
 		speed *= LaunchCore.boostMultiplier(self.launchBoost, now - self.launchAt, GameConfig.Launch)
 	end
@@ -135,6 +142,7 @@ function VillainAI:step(dt, now, target, spinFraction, onSlamImpact)
 
 	local toTarget = flat(target.pos - pos)
 	local dist = toTarget.Magnitude
+	self.lastDist = dist
 	local fromCenter = flat(pos - self.center)
 	local wish, tilt = Vector3.zero, 0
 	local t = now - self.stateAt
@@ -164,6 +172,7 @@ function VillainAI:step(dt, now, target, spinFraction, onSlamImpact)
 		tilt = 0.7 -- visibly rears back and slows: the tell
 		if t >= self.diff.Windup then
 			self.dashTarget = target.pos
+			self.dashStartedAt = now
 			self:go("dash", now)
 		end
 	elseif s == "dash" then
@@ -254,6 +263,40 @@ function VillainAI:step(dt, now, target, spinFraction, onSlamImpact)
 		wobble = math.sin(now * 9) * 0.25 * (1 - spinFraction / GameConfig.Combat.LowSpinFraction)
 	end
 	self.rec.align.CFrame = CFrame.fromMatrix(Vector3.zero, r, u, b) * CFrame.Angles(tilt * math.rad(M.MaxTiltDeg) * 0.6, 0, wobble)
+end
+
+-- Which special to use now, if any: 1 or 2 (slot), "awaken", or nil.
+-- info = { specials = its SpecialsCore side, foe = the player's side, canAwaken = bool, spin = its spin fraction }
+function VillainAI:chooseSpecial(now, info)
+	if now - self.lastSpecialAt < SPECIAL_GAP then
+		return nil
+	end
+	local function pick(choice)
+		self.lastSpecialAt = now
+		return choice
+	end
+	if info.canAwaken then
+		return pick("awaken")
+	end
+	local dist = self.lastDist or math.huge
+	local foe = info.foe
+	local threatened = (foe.empower ~= nil and now <= foe.empower.untilT) or now < foe.awakenedUntil
+	for i, s in ipairs(info.specials.specials) do
+		local def = s.def
+		if def and now >= s.readyAt then
+			local kind, t = def.Kind, def.Tuning
+			if kind == "dash" and self.state == "dash" and now - self.dashStartedAt < 0.15 then
+				return pick(i)
+			elseif kind == "quake" and dist < t.Radius * 0.8 and self.rng:NextNumber() < self.diff.Aggression * 0.05 then
+				return pick(i)
+			elseif kind == "guard" and threatened and dist < 18 then
+				return pick(i)
+			elseif kind == "heal" and info.spin < 0.4 then
+				return pick(i)
+			end
+		end
+	end
+	return nil
 end
 
 -- A hit lands on the villain: interrupt a windup sometimes and back off.

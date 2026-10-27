@@ -134,6 +134,25 @@ function BattleCore.damage(b, key, amount)
 	return applied
 end
 
+-- Give a side spin back (a heal special), capped at its max. Only while active. Returns the amount applied.
+function BattleCore.heal(b, key, amount)
+	local s = b.sides[key]
+	if b.state ~= "active" or not s or not finite(amount) or amount <= 0 or s.spin <= 0 then
+		return 0
+	end
+	local applied = math.min(amount, s.maxSpin - s.spin)
+	s.spin += applied
+	return applied
+end
+
+-- Changes how fast a side's spin drains (a spirit passive). Before or during the battle.
+function BattleCore.setDrain(b, key, drain)
+	local s = b.sides[key]
+	if s and finite(drain) and drain >= 0 then
+		s.drain = drain
+	end
+end
+
 -- Mark a side as rung out (resolved on the next update, so a double ring-out in one step is a draw).
 function BattleCore.ringOut(b, key)
 	local s = b.sides[key]

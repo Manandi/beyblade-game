@@ -31,6 +31,287 @@ local function install(rootKey, path, class, name, source)
 	s.Source = source
 	s.Parent = parent
 end
+install('RS', '', 'ModuleScript', 'BeyVisuals', [=====[
+--!nonstrict
+-- Builds a bey's looks. If the Blender meshes have been imported into ReplicatedStorage.BeyMeshes (see README),
+-- each part uses its mesh; otherwise it falls back to a simple shape built from basic Roblox parts (BeyDesigns).
+-- Everything is welded to the spinning hub, massless and non-colliding, so the physics body is unchanged.
+-- Call BeyVisuals.Attach on the SERVER after the model is parented to Workspace (so welds capture the layout).
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local BeyConfig = require(script.Parent.BeyConfig)
+local BeyDesigns = require(script.Parent.BeyDesigns)
+local BeyMeshData = require(script.Parent.BeyMeshData)
+
+local BeyVisuals = {}
+
+local Y_OFFSET = -0.7 -- sits the visual low in the 4-stud collision ball so the tip nearly touches the ground
+local RAD90 = math.rad(90)
+local TAU = math.pi * 2
+
+local function rarityRank(rarity)
+	for i, r in ipairs(BeyConfig.Rarities) do
+		if r == rarity then
+			return i
+		end
+	end
+	return 1
+end
+
+-- ctx = { hub = Part, root = CFrame (the body's CFrame), parent = Instance }
+local function addPart(ctx, size, localCF, color, material, shape)
+	local p = Instance.new("Part")
+	p.Anchored = false
+	p.CanCollide = false
+	p.CanQuery = false
+	p.CanTouch = false
+	p.Massless = true
+	p.TopSurface = Enum.SurfaceType.Smooth
+	p.BottomSurface = Enum.SurfaceType.Smooth
+	if shape then
+		p.Shape = shape
+	end
+	p.Size = size
+	p.Color = color
+	p.Material = material or Enum.Material.Metal
+	p.CFrame = ctx.root * CFrame.new(0, Y_OFFSET, 0) * localCF
+	p.Parent = ctx.parent
+	local weld = Instance.new("WeldConstraint")
+	weld.Part0 = ctx.hub
+	weld.Part1 = p
+	weld.Parent = p
+	return p
+end
+
+local function addBlock(ctx, size, localCF, color, material)
+	return addPart(ctx, size, localCF, color, material)
+end
+
+local function addCyl(ctx, diameter, height, y, color, material)
+	return addPart(
+		ctx,
+		Vector3.new(height, diameter, diameter),
+		CFrame.new(0, y, 0) * CFrame.Angles(0, 0, RAD90),
+		color,
+		material,
+		Enum.PartType.Cylinder
+	)
+end
+
+local function addBall(ctx, diameter, y, color, material)
+	return addPart(ctx, Vector3.new(diameter, diameter, diameter), CFrame.new(0, y, 0), color, material, Enum.PartType.Ball)
+end
+
+local function addEllipsoid(ctx, size, localCF, color, material)
+	local p = addPart(ctx, size, localCF, color, material)
+	local mesh = Instance.new("SpecialMesh")
+	mesh.MeshType = Enum.MeshType.Sphere
+	mesh.Parent = p
+	return p
+end
+
+-- Places something `radius` out along direction angle `a`, then twists it by `swirl` about its own centre.
+local function radial(a, y, radius, swirl)
+	return CFrame.Angles(0, a, 0) * CFrame.new(0, y, -radius) * CFrame.Angles(0, swirl or 0, 0)
+end
+
+local function buildLayer(ctx, d)
+	local y = 0.55
+	addCyl(ctx, 2.3, 0.16, y, d.Primary)
+	local n = d.Count
+	for i = 1, n do
+		local a = TAU * i / n
+		if d.Style == "Spike" then
+			addBlock(ctx, Vector3.new(0.28, 0.34, 1.6), radial(a, y + 0.15, 1.25), d.Primary)
+			addBlock(ctx, Vector3.new(0.09, 0.1, 1.2), radial(a, y + 0.35, 1.2), d.Accent)
+			addBlock(ctx, Vector3.new(0.2, 0.26, 0.4), radial(a, y + 0.13, 2.0), d.Accent)
+		elseif d.Style == "Hook" then
+			addBlock(ctx, Vector3.new(0.42, 0.3, 1.45), radial(a, y + 0.15, 1.2, -0.45), d.Primary)
+			addBlock(ctx, Vector3.new(0.3, 0.26, 0.6), radial(a, y + 0.13, 1.85, -1.0), d.Accent)
+		elseif d.Style == "Blade" then
+			addBlock(ctx, Vector3.new(0.34, 0.3, 1.85), radial(a, y + 0.15, 1.2, 0.3), d.Primary)
+			addBlock(ctx, Vector3.new(0.08, 0.32, 1.85), radial(a, y + 0.16, 1.2, 0.3) * CFrame.new(0.19, 0, 0), d.Accent)
+		elseif d.Style == "Petal" then
+			addEllipsoid(ctx, Vector3.new(0.95, 0.42, 1.9), radial(a, y + 0.2, 1.15, 0.5), d.Primary)
+			addEllipsoid(ctx, Vector3.new(0.3, 0.2, 0.9), radial(a, y + 0.35, 1.2, 0.5), d.Accent)
+		elseif d.Style == "Armor" then
+			local r = 1.45
+			local w = 2 * r * math.tan(math.pi / n) + 0.05
+			addBlock(ctx, Vector3.new(w, 0.55, 0.55), radial(a, y + 0.2, r), d.Primary)
+			addBlock(ctx, Vector3.new(w * 0.6, 0.1, 0.2), radial(a, y + 0.5, r), d.Accent)
+		end
+	end
+end
+
+local function buildDisc(ctx, d)
+	if d.Style == "Heavy" then
+		addCyl(ctx, 2.8, 0.7, 0, d.Primary)
+		addCyl(ctx, 3.0, 0.16, 0, d.Accent)
+	elseif d.Style == "Ring" then
+		addCyl(ctx, 3.0, 0.45, 0, d.Primary)
+		addCyl(ctx, 1.8, 0.5, 0, d.Accent)
+	elseif d.Style == "Fly" then
+		addCyl(ctx, 3.8, 0.2, 0, d.Primary)
+		addCyl(ctx, 1.6, 0.5, 0, d.Accent)
+	elseif d.Style == "Stack" then
+		addCyl(ctx, 3.0, 0.3, -0.2, d.Primary)
+		addCyl(ctx, 2.4, 0.3, 0.1, d.Accent)
+		addCyl(ctx, 1.8, 0.3, 0.35, d.Primary)
+	end
+end
+
+local function buildDriver(ctx, d)
+	if d.Style == "Flat" then
+		addCyl(ctx, 1.2, 0.4, -0.6, d.Primary)
+		addCyl(ctx, 0.9, 0.12, -0.85, d.Accent)
+	elseif d.Style == "Round" then
+		addCyl(ctx, 0.55, 0.4, -0.5, d.Primary)
+		addBall(ctx, 0.95, -0.85, d.Accent)
+	elseif d.Style == "Needle" then
+		addCyl(ctx, 0.6, 0.7, -0.6, d.Primary)
+		addCyl(ctx, 0.28, 0.6, -1.1, d.Accent)
+		addBall(ctx, 0.22, -1.42, d.Accent)
+	elseif d.Style == "Tripod" then
+		addCyl(ctx, 0.9, 0.3, -0.5, d.Primary)
+		for i = 1, 3 do
+			local a = TAU * i / 3
+			addBlock(ctx, Vector3.new(0.2, 0.7, 0.2), CFrame.Angles(0, a, 0) * CFrame.new(0, -0.95, -0.4) * CFrame.Angles(-0.25, 0, 0), d.Accent)
+		end
+	elseif d.Style == "Cup" then
+		addCyl(ctx, 1.4, 0.5, -0.65, d.Primary)
+		addCyl(ctx, 1.5, 0.1, -0.5, d.Accent, Enum.Material.Neon)
+	end
+end
+
+-- Rarity dressing: Epic+ get a glowing trim ring, Legendary+ sparks, Ultra Legendary a light too.
+local function buildRarityEffects(ctx, layerDesign, rarity, meshed)
+	local rank = rarityRank(rarity)
+	if rank >= rarityRank("Epic") and not meshed then -- the meshes model their own rarity trim
+		addCyl(ctx, 2.6, 0.06, 0.42, layerDesign.Accent, Enum.Material.Neon)
+	end
+	if rank >= rarityRank("Legendary") then
+		local at = Instance.new("Attachment")
+		at.Parent = ctx.hub
+		local e = Instance.new("ParticleEmitter")
+		e.Color = ColorSequence.new(layerDesign.Accent)
+		e.LightEmission = 1
+		e.Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.4), NumberSequenceKeypoint.new(1, 0) })
+		e.Lifetime = NumberRange.new(0.3, 0.6)
+		e.Speed = NumberRange.new(2, 5)
+		e.SpreadAngle = Vector2.new(180, 180)
+		e.Rate = rank >= rarityRank("UltraLegendary") and 40 or 16
+		e.Parent = at
+	end
+	if rank >= rarityRank("UltraLegendary") then
+		local light = Instance.new("PointLight")
+		light.Color = layerDesign.Accent
+		light.Brightness = 2
+		light.Range = 12
+		light.Parent = ctx.hub
+	end
+end
+
+-- hub: the spinning Part the visuals attach to. root: the body's CFrame when the hub was placed.
+-- partIds: { Layer = id, Disc = id, Driver = id }. The highest rarity among the three sets the dressing.
+-- Imported MeshPart named `name` anywhere under ReplicatedStorage.BeyMeshes (the importer may nest them in Models).
+local function findMesh(name)
+	local folder = ReplicatedStorage:FindFirstChild("BeyMeshes")
+	local found = folder and folder:FindFirstChild(name, true)
+	if found and found:IsA("MeshPart") and BeyMeshData[name] then
+		return found
+	end
+	return nil
+end
+
+-- Clones a mesh, resizes it to the size Blender recorded (so the import scale doesn't matter) and welds it on.
+local function addMesh(ctx, template, data, color, material, lift)
+	local p = template:Clone()
+	for _, child in ipairs(p:GetChildren()) do
+		child:Destroy() -- drop anything the importer attached (SurfaceAppearance, welds)
+	end
+	pcall(function()
+		p.TextureID = ""
+	end)
+	p.Anchored = false
+	p.CanCollide = false
+	p.CanQuery = false
+	p.CanTouch = false
+	p.Massless = true
+	p.Color = color
+	p.Material = material
+	p.Size = data.Size
+	p.CFrame = ctx.root * CFrame.new(0, Y_OFFSET + lift, 0) * CFrame.new(data.Center)
+	p.Parent = ctx.parent
+	local weld = Instance.new("WeldConstraint")
+	weld.Part0 = ctx.hub
+	weld.Part1 = p
+	weld.Parent = p
+end
+
+-- Uses the part's two meshes if both are imported; returns false so the caller can fall back.
+-- Lowest and highest point of a part's two meshes (bey-local studs), or nil if it has no mesh data.
+local function meshSpan(id)
+	local p, a = BeyMeshData[id .. "_P"], BeyMeshData[id .. "_A"]
+	if not (p and a) then
+		return nil
+	end
+	local bottom = math.min(p.Center.Y - p.Size.Y / 2, a.Center.Y - a.Size.Y / 2)
+	local top = math.max(p.Center.Y + p.Size.Y / 2, a.Center.Y + a.Size.Y / 2)
+	return bottom, top
+end
+
+-- lift: how far to move the part up or down so it sits flush on the parts next to it.
+local function tryMeshes(ctx, id, slot, design, lift)
+	local primary, accent = findMesh(id .. "_P"), findMesh(id .. "_A")
+	if not (primary and accent) then
+		return false
+	end
+	local rank = rarityRank(BeyConfig.Parts[id].Rarity)
+	local body = slot == "Disc" and Enum.Material.Metal or Enum.Material.SmoothPlastic
+	addMesh(ctx, primary, BeyMeshData[id .. "_P"], design.Primary, body, lift)
+	addMesh(ctx, accent, BeyMeshData[id .. "_A"], design.Accent, rank >= rarityRank("Legendary") and Enum.Material.Neon or Enum.Material.SmoothPlastic, lift)
+	return true
+end
+
+function BeyVisuals.Attach(hub, root, partIds, parent)
+	local ctx = { hub = hub, root = root, parent = parent or hub.Parent }
+	local layer, disc, driver = BeyDesigns.Parts[partIds.Layer], BeyDesigns.Parts[partIds.Disc], BeyDesigns.Parts[partIds.Driver]
+	assert(layer and disc and driver, "missing design for a part")
+	-- Stack the parts flush: the wheel stays put, the layer sits on the wheel's top face and the driver hangs
+	-- from its bottom face. Wheels differ in thickness, so fixed heights would leave gaps. A small overlap hides seams.
+	local OVERLAP = 0.02
+	local discBottom, discTop = meshSpan(partIds.Disc)
+	if not (discBottom and findMesh(partIds.Disc .. "_P")) then
+		discBottom, discTop = -0.35, 0.35 -- the block-built fallback wheel
+	end
+	local layerBottom = meshSpan(partIds.Layer)
+	local _, driverTop = meshSpan(partIds.Driver)
+	local layerLift = layerBottom and (discTop - OVERLAP - layerBottom) or 0
+	local driverLift = driverTop and (discBottom + OVERLAP - driverTop) or 0
+
+	if not tryMeshes(ctx, partIds.Disc, "Disc", disc, 0) then
+		buildDisc(ctx, disc)
+	end
+	if not tryMeshes(ctx, partIds.Driver, "Driver", driver, driverLift) then
+		buildDriver(ctx, driver)
+	end
+	local layerMeshed = tryMeshes(ctx, partIds.Layer, "Layer", layer, layerLift)
+	if not layerMeshed then
+		buildLayer(ctx, layer)
+	end
+
+	local best = "Common"
+	for _, slot in ipairs(BeyConfig.Slots) do
+		local rarity = BeyConfig.Parts[partIds[slot]].Rarity
+		if rarityRank(rarity) > rarityRank(best) then
+			best = rarity
+		end
+	end
+	buildRarityEffects(ctx, layer, best, layerMeshed)
+end
+
+return BeyVisuals
+]=====])
 install('RS', '', 'ModuleScript', 'GameConfig', [=====[
 --!nonstrict
 -- GameConfig: tuning for combat, battles, the villain, progression and saving. Pure data (no Roblox APIs).
@@ -109,6 +390,20 @@ GameConfig.Launch = {
 	BoostTime = 4, -- ... fading to nothing over this many seconds
 }
 
+-- Specials and Awakening in battle (per-special numbers live in BeyConfig.Specials; see Core/SpecialsCore.lua).
+GameConfig.Specials = {
+	FirstUseDelay = 2.5, -- seconds after LET IT RIP before specials can be used
+	-- Awakening: a meter that fills during the battle; when full, press R to awaken your spirit (once per battle).
+	MeterMax = 100,
+	MeterPerSecond = 1.0, -- passive fill
+	MeterPerDamageDealt = 2.4, -- per point of spin you knock off the foe
+	MeterPerDamageTaken = 1.6, -- per point you lose to hits (comebacks)
+	AwakenDuration = 10,
+	AwakenAttack = 1.25, -- damage dealt x
+	AwakenDefense = 1.25, -- damage and knockback taken / this
+	AwakenSpeed = 1.1, -- top speed x
+}
+
 GameConfig.Difficulty = {
 	-- Speed: villain top-speed multiplier. Windup: seconds of warning before an attack. Aggression: 0..1 how often it
 	-- attacks when in range. Damage: multiplier on its hits. Reward: multiplier on rewards for beating it.
@@ -122,6 +417,8 @@ GameConfig.Villain = {
 	Id = "rook",
 	Name = "Rook the Grinder",
 	Parts = { Layer = "layer_skyrend", Disc = "disc_bulwarkring", Driver = "driver_spikegrip" }, -- all Uncommon
+	Spirit = "spirit_thornstag",
+	Specials = { "special_cometdrive", "special_quakestomp" },
 	Level = 3,
 	Difficulty = "Normal",
 	-- After this many wins against it, the next rematch uses Hard (shown to the player).
@@ -370,6 +667,25 @@ function BattleCore.damage(b, key, amount)
 	local applied = math.min(amount, s.spin)
 	s.spin -= applied
 	return applied
+end
+
+-- Give a side spin back (a heal special), capped at its max. Only while active. Returns the amount applied.
+function BattleCore.heal(b, key, amount)
+	local s = b.sides[key]
+	if b.state ~= "active" or not s or not finite(amount) or amount <= 0 or s.spin <= 0 then
+		return 0
+	end
+	local applied = math.min(amount, s.maxSpin - s.spin)
+	s.spin += applied
+	return applied
+end
+
+-- Changes how fast a side's spin drains (a spirit passive). Before or during the battle.
+function BattleCore.setDrain(b, key, drain)
+	local s = b.sides[key]
+	if s and finite(drain) and drain >= 0 then
+		s.drain = drain
+	end
 end
 
 -- Mark a side as rung out (resolved on the next update, so a double ring-out in one step is a draw).
@@ -730,294 +1046,4 @@ end
 
 return LaunchCore
 ]=====])
-install('RS', 'Core', 'ModuleScript', 'MovementCore', [=====[
---!nonstrict
--- MovementCore: the bey's movement rules as pure functions, shared by the player's controller (client) and the
--- villain AI (server). No Roblox services or instances: only Vector3 and numbers, so it is unit-tested outside
--- Roblox (tools/tests/movement.test.luau). Tests prove the rules; they do NOT prove how Roblox physics responds.
---
--- State machines here:
---   Ground state  air <-> ground with hysteresis: grounded the moment a probe hits walkable ground, airborne
---                 only after UngroundDelay seconds without a hit (stops seams between slabs from flickering).
---   Actions       one takeoff boost per takeoff, jumps on a cooldown, slam as an explicit state:
---                 ready -> diving -> (one impact on landing) -> ready. Jump, launch and slam never stack.
---
--- M is BeyConfig.Movement. Times are seconds; `now` is any monotonic clock.
-
-local MovementCore = {}
-
-local function finite(n)
-	return type(n) == "number" and n == n and n ~= math.huge and n ~= -math.huge
-end
-MovementCore.finite = finite
-
-local function finiteVector(v)
-	return v ~= nil and finite(v.X) and finite(v.Y) and finite(v.Z)
-end
-MovementCore.finiteVector = finiteVector
-
-local function clampMagnitude(v, max)
-	local m = v.Magnitude
-	if m > max and m > 0 then
-		return v * (max / m)
-	end
-	return v
-end
-MovementCore.clampMagnitude = clampMagnitude
-
--- Clamp a frame time so a hitch (or a bad value) can't launch the bey across the map.
-function MovementCore.safeDt(dt, M)
-	if not finite(dt) or dt < 0 then
-		return 0
-	end
-	return math.min(dt, M.MaxDt)
-end
-
--- Replace a non-finite velocity with zero and cap absurd speeds. Returns the vector and whether it was repaired.
-function MovementCore.sanitizeVelocity(v, M)
-	if not finiteVector(v) then
-		return Vector3.zero, true
-	end
-	if v.Magnitude > M.MaxSpeed then
-		return clampMagnitude(v, M.MaxSpeed), true
-	end
-	return v, false
-end
-
--------------------------------------------------------------------------------- ground state
-
-function MovementCore.newGround()
-	return {
-		grounded = false,
-		lastHitAt = -math.huge,
-		groundedSince = -math.huge,
-		airborneSince = 0,
-		normal = Vector3.yAxis,
-		flips = 0, -- ground/air changes, for diagnostics
-	}
-end
-
--- hitNormal: the probe's surface normal, or nil if nothing walkable was hit this frame.
--- Returns "landed", "tookoff", "ground" or "air".
-function MovementCore.updateGround(g, hitNormal, now, M)
-	local walkable = hitNormal ~= nil and finiteVector(hitNormal) and hitNormal.Y > M.MinGroundNormalY
-	if walkable then
-		g.lastHitAt = now
-		g.normal = hitNormal
-		if not g.grounded then
-			g.grounded = true
-			g.groundedSince = now
-			g.flips += 1
-			return "landed"
-		end
-		return "ground"
-	end
-	if g.grounded and now - g.lastHitAt > M.UngroundDelay then
-		g.grounded = false
-		g.airborneSince = now
-		g.flips += 1
-		return "tookoff"
-	end
-	return g.grounded and "ground" or "air"
-end
-
--- A jump leaves the ground immediately (no hysteresis wait) so the jump isn't eaten by the next probe.
-function MovementCore.forceAirborne(g, now)
-	if g.grounded then
-		g.grounded = false
-		g.airborneSince = now
-		g.flips += 1
-	end
-	g.lastHitAt = -math.huge
-end
-
--------------------------------------------------------------------------------- actions (jump, launch, slam)
-
-function MovementCore.newActions()
-	return {
-		slam = "ready", -- "ready" | "diving"
-		slamStartedAt = -math.huge,
-		slamReadyAt = 0,
-		lastJumpAt = -math.huge,
-		launchUsed = false, -- a takeoff boost was already given since the last landing
-	}
-end
-
--- Right after a jump the probe would still touch the floor we are leaving; ignore it briefly.
-function MovementCore.probeSuppressed(a, now, M)
-	return now - a.lastJumpAt < M.JumpGroundIgnore
-end
-
-function MovementCore.canJump(a, g, now, M)
-	return g.grounded and a.slam ~= "diving" and now - a.lastJumpAt >= M.JumpCooldown
-end
-
--- Returns the new velocity after a jump. Call only when canJump is true.
-function MovementCore.jump(a, g, vel, tilt, now, M)
-	a.lastJumpAt = now
-	a.launchUsed = true -- a jump is its own takeoff; no ramp boost on top
-	MovementCore.forceAirborne(g, now)
-	local up = M.JumpSpeed * (1 + M.JumpTiltBonus * math.max(tilt, 0))
-	return Vector3.new(vel.X, up, vel.Z)
-end
-
--- Extra upward speed when leaving a rising surface (a ramp or the stadium lip) nose-up. At most once per takeoff.
-function MovementCore.takeoffBoost(a, vel, tilt, M)
-	if a.launchUsed or vel.Y <= M.MinLaunchVy then
-		return 0
-	end
-	local flat = Vector3.new(vel.X, 0, vel.Z).Magnitude
-	if flat <= M.MinLaunchSpeed then
-		return 0
-	end
-	a.launchUsed = true
-	local factor = tilt >= 0 and tilt or tilt * M.LaunchDownFactor
-	return math.clamp(flat * M.LaunchFactor * factor, -M.MaxLaunchBoost, M.MaxLaunchBoost)
-end
-
-function MovementCore.canSlam(a, g, now, M)
-	return not g.grounded and a.slam == "ready" and now >= a.slamReadyAt and now - g.airborneSince >= M.SlamMinAirTime
-end
-
--- Starts a slam. Returns the dive velocity. Call only when canSlam is true.
-function MovementCore.startSlam(a, vel, now, M)
-	a.slam = "diving"
-	a.slamStartedAt = now
-	a.slamReadyAt = now + M.SlamCooldown
-	return Vector3.new(vel.X * 0.4, -M.SlamSpeed, vel.Z * 0.4)
-end
-
--- Call with the ground event each frame. Returns "impact" exactly once when a dive lands, "expired" if a dive
--- ran too long without landing, else nil. Landing also re-arms the takeoff boost.
-function MovementCore.resolveActions(a, groundEvent, now, M)
-	if groundEvent == "landed" then
-		a.launchUsed = false
-		if a.slam == "diving" then
-			a.slam = "ready"
-			return "impact"
-		end
-	elseif a.slam == "diving" and now - a.slamStartedAt > M.SlamTimeout then
-		a.slam = "ready"
-		return "expired"
-	end
-	return nil
-end
-
--------------------------------------------------------------------------------- velocity
-
--- One ground frame. vel: current velocity; n: surface normal; wish: desired direction (flat, length 0..1);
--- tilt: -1 nose down .. +1 nose up; speed: the bey's base top speed. Returns the new velocity.
-function MovementCore.groundVelocity(vel, n, wish, tilt, speed, dt, M)
-	-- The surface holds us: remove velocity going into it. Gravity (applied by the engine) keeps acting along the
-	-- surface; steering is a limited push, never a velocity target, so steep slopes pull the bey back down.
-	local into = vel:Dot(n)
-	if into < 0 then
-		vel = vel - n * into
-	end
-	local traction = math.clamp((n.Y - M.MinGroundNormalY) / (1 - M.MinGroundNormalY), M.MinTraction, 1)
-	local lean = math.max(-tilt, 0)
-	local brakeLean = math.max(tilt, 0)
-	-- Leaning back cuts the drive as well as braking, so nose-up actually stops you even while holding forward.
-	local topSpeed = speed * (1 + M.LeanSpeedBonus * lean) * (1 - M.BrakeDriveCut * brakeLean)
-	local push = M.Accel * (1 + M.LeanAccelBonus * lean) * (1 - M.BrakeDriveCut * brakeLean) * traction
-	local wishMag = math.min(wish.Magnitude, 1)
-	local hasInput = wishMag > 0.05
-
-	if hasInput then
-		local dir = wish - n * wish:Dot(n)
-		if dir.Magnitude > 1e-3 then
-			dir = dir.Unit
-			local along = vel:Dot(dir)
-			if along < topSpeed then
-				vel = vel + dir * math.min(push * dt * wishMag, topSpeed - along)
-			end
-			-- Grip: bleed off sideways drift so turns bite (weakly on steep walls, so you still slide).
-			local side = vel - dir * vel:Dot(dir)
-			vel = vel - side * math.min(1, M.Grip * traction * dt)
-		end
-	end
-
-	local decel = M.RollingFriction + (hasInput and 0 or M.Brake * traction) + brakeLean * M.LeanBrake * traction
-	local spd = vel.Magnitude
-	if spd > 0 then
-		vel = vel * (math.max(spd - decel * dt, 0) / spd)
-	end
-	return vel
-end
-
--- One air frame: weak steering that never adds beyond the faster of (current flat speed, top speed), and tilt
--- shaping the flight (nose up glides, nose down dives). No glide/dive while slamming.
-function MovementCore.airVelocity(vel, wish, tilt, speed, slamming, dt, M)
-	local flat = Vector3.new(vel.X, 0, vel.Z)
-	if wish.Magnitude > 0.05 then
-		local cap = math.max(flat.Magnitude, speed)
-		flat = clampMagnitude(flat + wish * M.AirAccel * dt, cap)
-	end
-	local vy = vel.Y
-	if not slamming then
-		vy = vy + (tilt >= 0 and tilt * M.GlideLift or tilt * M.DiveAssist) * dt
-	end
-	return Vector3.new(flat.X, vy, flat.Z)
-end
-
--- Top speed from stats.
-function MovementCore.topSpeed(stats, M)
-	return M.BaseSpeed + (stats.Attack or 0) * M.SpeedPerAttack + (stats.Balance or 0) * M.SpeedPerBalance
-end
-
--------------------------------------------------------------------------------- facing and orientation
-
--- Which way the nose points (a yaw angle). Follows the travel direction when moving; when nearly still it KEEPS
--- the last facing (no snapping to the camera, so it can't flip back and forth at low speed).
-function MovementCore.noseYaw(prevYaw, vel, dt, M)
-	local flat = Vector3.new(vel.X, 0, vel.Z)
-	if flat.Magnitude <= M.NoseMinSpeed or not finiteVector(flat) then
-		return prevYaw
-	end
-	local target = math.atan2(-flat.X, -flat.Z)
-	local diff = (target - prevYaw + math.pi) % (2 * math.pi) - math.pi
-	return prevYaw + diff * math.min(1, M.NoseTurnRate * dt)
-end
-
--- Smoothed "up" for the bey: the ground normal when grounded, easing back to world up in the air.
-function MovementCore.surfaceUp(prevUp, groundNormal, dt, M)
-	local target = groundNormal or Vector3.yAxis
-	local rate = groundNormal and M.SurfaceAlignRate or M.AirUprightRate
-	local up = prevUp:Lerp(target, 1 - math.exp(-rate * dt))
-	if up.Magnitude < 1e-3 or not finiteVector(up) then
-		return Vector3.yAxis
-	end
-	return up.Unit
-end
-
--- Orthonormal frame (right, up, back) for a nose yaw on a surface "up". Use with CFrame.fromMatrix(pos, r, u, b).
-function MovementCore.frame(up, yaw)
-	local flatNose = Vector3.new(-math.sin(yaw), 0, -math.cos(yaw))
-	local fwd = flatNose - up * flatNose:Dot(up)
-	if fwd.Magnitude < 1e-3 then
-		fwd = flatNose
-	end
-	fwd = fwd.Unit
-	local back = -fwd
-	return up:Cross(back), up, back
-end
-
--------------------------------------------------------------------------------- recovery
-
-function MovementCore.newStuck()
-	return { slowSince = nil }
-end
-
--- True when the bey has been airborne-and-motionless (wedged somewhere) for StuckTime seconds.
-function MovementCore.isStuck(s, grounded, vel, now, M)
-	if not grounded and vel.Magnitude < 1 then
-		s.slowSince = s.slowSince or now
-		return now - s.slowSince >= M.StuckTime
-	end
-	s.slowSince = nil
-	return false
-end
-
-return MovementCore
-]=====])
-print('Spinforge installer part 2 of 7 done. Now run part 3.')
+print('Spinforge installer part 2 of 8 done. Now run part 3.')

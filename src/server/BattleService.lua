@@ -4,7 +4,8 @@
 --   -> result screen (Rematch / Leave, or it closes itself) -> cleanup (beys removed, avatar restored)
 -- What the server trusts from the client: only the player's bey position/velocity (client-owned physics, which a
 -- cheater could fake), a bare "my slam landed" signal (checked against the fall the server observed), and the time
--- the player pressed LAUNCH (checked against the meter's window; the server judges the timing itself).
+-- the player pressed LAUNCH (checked against the meter's window; the server judges the timing itself), and
+-- "use special 1/2" / "awaken" requests (the server checks the loadout, cooldowns and meter; see SpecialsCore).
 -- Clients never send damage, results, XP or Shards. See HANDOFF.md "Residual exploit exposure".
 
 local Players = game:GetService("Players")
@@ -19,6 +20,8 @@ local CombatCore = require(Shared.Core.CombatCore)
 local BattleCore = require(Shared.Core.BattleCore)
 local Progression = require(Shared.Core.Progression)
 local LaunchCore = require(Shared.Core.LaunchCore)
+local SpecialsCore = require(Shared.Core.SpecialsCore)
+local BeyConfig = require(Shared.BeyConfig)
 
 local BeyFactory = require(script.Parent.BeyFactory)
 local BeyService = require(script.Parent.BeyService)
@@ -26,7 +29,8 @@ local DataService = require(script.Parent.DataService)
 local VillainAI = require(script.Parent.VillainAI)
 local World = require(script.Parent.World)
 
-local C, B, V, P, L = GameConfig.Combat, GameConfig.Battle, GameConfig.Villain, GameConfig.Progression, GameConfig.Launch
+local C, B, V, P, L, A = GameConfig.Combat, GameConfig.Battle, GameConfig.Villain, GameConfig.Progression, GameConfig.Launch, GameConfig.Specials
+local SNAPSHOT_EVERY = 0.2 -- seconds between specials/awakening HUD updates sent to the player
 
 local BattleService = {}
 
@@ -201,11 +205,21 @@ startBattle = function(player)
 		-- Skill launch: the meter runs on the shared server clock during the countdown.
 		meter = LaunchCore.newMeter(Workspace:GetServerTimeNow(), B.Countdown, Random.new():NextNumber(), L),
 		launch = {}, -- side -> { quality, label }
+		snapshotAt = 0,
 	}
+	local equipped = (DataService.get(player) or {}).Equipped or BeyConfig.StarterLoadout
+	rec.specials = {
+		player = SpecialsCore.newSide(equipped, BeyConfig.Items),
+		villain = SpecialsCore.newSide({ Spirit = V.Spirit, Special1 = V.Specials[1], Special2 = V.Specials[2] }, BeyConfig.Items),
+	}
+	rec.spirits = { player = equipped.Spirit, villain = V.Spirit }
 	rec.battle = BattleCore.new(rec.id, {
 		{ key = "player", maxSpin = mine.maxSpin, drain = CombatCore.drainPerSecond(mine.stats, C) },
 		{ key = "villain", maxSpin = villain.maxSpin, drain = CombatCore.drainPerSecond(villain.stats, C) },
 	}, B, now)
+	for key, side in pairs(rec.specials) do
+		BattleCore.setDrain(rec.battle, key, rec.battle.sides[key].drain * SpecialsCore.drain(side))
+	end
 	rec.ai = VillainAI.new(villain, diff, center, { BeyService.folder() })
 	-- The villain's launch is decided now (its skill depends on difficulty).
 	local vq = LaunchCore.villainQuality(diff.Launch or 0.7, Random.new():NextNumber())
@@ -220,6 +234,8 @@ startBattle = function(player)
 		seconds = B.Countdown,
 		foe = V.Name,
 		difficulty = difficulty,
+		loadout = { spirit = equipped.Spirit, specials = { equipped.Special1, equipped.Special2 } },
+		foeLoadout = { spirit = V.Spirit, specials = V.Specials },
 		meter = { start = m.start, finish = m.finish, period = m.period, zoneCenter = m.zoneCenter, greenHalf = m.greenHalf, yellowHalf = m.yellowHalf },
 	})
 end
@@ -237,27 +253,52 @@ local function resolveContact(rec, now)
 	if not n or closing <= C.MinImpactSpeed then
 		return
 	end
-	local dealt = CombatCore.hitDamage(rec.mine.stats, rec.villain.stats, closing, share, C)
-	local taken = CombatCore.hitDamage(rec.villain.stats, rec.mine.stats, closing, 1 - share, C) * rec.diff.Damage
+	local sp, sv = rec.specials.player, rec.specials.villain
+	local pEmpowered = sp.empower ~= nil and now <= sp.empower.untilT
+	local vEmpowered = sv.empower ~= nil and now <= sv.empower.untilT
+	local pOut, pKbOut = SpecialsCore.outgoing(sp, now, A, true)
+	local vOut, vKbOut = SpecialsCore.outgoing(sv, now, A, true)
+	local pIn, pKbIn = SpecialsCore.incoming(sp, now, A)
+	local vIn, vKbIn = SpecialsCore.incoming(sv, now, A)
+	local dealt = CombatCore.hitDamage(rec.mine.stats, rec.villain.stats, closing, share, C) * pOut * vIn
+	local taken = CombatCore.hitDamage(rec.villain.stats, rec.mine.stats, closing, 1 - share, C) * rec.diff.Damage * vOut * pIn
 	dealt = BattleCore.damage(rec.battle, "villain", dealt)
 	taken = BattleCore.damage(rec.battle, "player", taken)
-	local kbVillain = CombatCore.knockback(rec.mine.stats, rec.villain.stats, closing, C)
-	local kbPlayer = CombatCore.knockback(rec.villain.stats, rec.mine.stats, closing, C)
+	SpecialsCore.charge(sp, dealt * A.MeterPerDamageDealt + taken * A.MeterPerDamageTaken, A)
+	SpecialsCore.charge(sv, taken * A.MeterPerDamageDealt + dealt * A.MeterPerDamageTaken, A)
+	local kbVillain = math.min(CombatCore.knockback(rec.mine.stats, rec.villain.stats, closing, C) * pKbOut * vKbIn, C.MaxKnockback * 2)
+	local kbPlayer = math.min(CombatCore.knockback(rec.villain.stats, rec.mine.stats, closing, C) * vKbOut * pKbIn, C.MaxKnockback * 2)
 	vb.AssemblyLinearVelocity += (n + Vector3.new(0, 0.25, 0)).Unit * kbVillain
 	remotes.Knockback:FireClient(rec.player, (-n + Vector3.new(0, 0.25, 0)).Unit * kbPlayer)
 	rec.ai:onHit(now)
-	send(rec.player, { kind = "hit", dealt = dealt, taken = taken, at = (pPos + vPos) / 2, strength = math.clamp(closing / 60, 0.2, 1) })
+	local strength = math.clamp(closing / 60, 0.2, 1)
+	if pEmpowered or vEmpowered then
+		strength = 1
+	end
+	send(rec.player, {
+		kind = "hit",
+		dealt = dealt,
+		taken = taken,
+		at = (pPos + vPos) / 2,
+		normal = n,
+		strength = strength,
+		crit = pEmpowered or nil,
+		foeCrit = vEmpowered or nil,
+	})
 end
 
 -- The player's slam landed (already validated by BeyService against the observed fall).
 local function playerSlam(rec, fall, now)
 	local pPos, vPos = rec.mine.body.Position, rec.villain.body.Position
 	local d = Vector3.new(vPos.X - pPos.X, 0, vPos.Z - pPos.Z)
-	local dmg = CombatCore.slamDamage(rec.mine.stats, rec.villain.stats, fall, d.Magnitude, C)
+	local pOut = SpecialsCore.outgoing(rec.specials.player, now, A, false)
+	local vIn = SpecialsCore.incoming(rec.specials.villain, now, A)
+	local dmg = CombatCore.slamDamage(rec.mine.stats, rec.villain.stats, fall, d.Magnitude, C) * pOut * vIn
 	local recoil = BattleCore.damage(rec.battle, "player", CombatCore.slamRecoil(rec.mine.stats, C))
 	local dealt = 0
 	if dmg > 0 then
 		dealt = BattleCore.damage(rec.battle, "villain", dmg)
+		SpecialsCore.charge(rec.specials.player, dealt * A.MeterPerDamageDealt, A)
 		local dir = (d.Magnitude > 0.01 and d.Unit or Vector3.new(0, 0, -1)) + Vector3.new(0, 0.6, 0)
 		rec.villain.body.AssemblyLinearVelocity += dir.Unit * C.SlamKnockback
 		rec.ai:onHit(now)
@@ -272,14 +313,89 @@ local function villainSlam(rec, fallSeen, now)
 	local fall = math.max(fallSeen, CombatCore.maxFall(rec.villainFall, now, C.SlamFallWindow))
 	local pPos, vPos = rec.mine.body.Position, rec.villain.body.Position
 	local d = Vector3.new(pPos.X - vPos.X, 0, pPos.Z - vPos.Z)
-	local dmg = CombatCore.slamDamage(rec.villain.stats, rec.mine.stats, fall, d.Magnitude, C) * rec.diff.Damage
+	local vOut = SpecialsCore.outgoing(rec.specials.villain, now, A, false)
+	local pIn = SpecialsCore.incoming(rec.specials.player, now, A)
+	local dmg = CombatCore.slamDamage(rec.villain.stats, rec.mine.stats, fall, d.Magnitude, C) * rec.diff.Damage * vOut * pIn
 	if dmg > 0 then
 		local taken = BattleCore.damage(rec.battle, "player", dmg)
+		SpecialsCore.charge(rec.specials.player, taken * A.MeterPerDamageTaken, A)
+		SpecialsCore.charge(rec.specials.villain, taken * A.MeterPerDamageDealt, A)
 		local dir = (d.Magnitude > 0.01 and d.Unit or Vector3.new(0, 0, 1)) + Vector3.new(0, 0.6, 0)
 		remotes.Knockback:FireClient(rec.player, dir.Unit * C.SlamKnockback)
 		send(rec.player, { kind = "hit", dealt = 0, taken = taken, at = pPos, strength = 1, slam = true })
 	end
 	send(rec.player, { kind = "villainSlam", at = vPos })
+end
+
+-- Uses special `index` for `who` ("player" | "villain"). The server applies everything except the player's own dash
+-- burst, which the player's client applies to its bey (client-owned physics). Returns true if it was used.
+local function useSpecial(rec, who, index, now)
+	local b = rec.battle
+	if b.state ~= "active" then
+		return false
+	end
+	local side = rec.specials[who]
+	local def = SpecialsCore.use(side, index, now)
+	if not def then
+		return false
+	end
+	local foeKey = who == "player" and "villain" or "player"
+	local selfBody = who == "player" and rec.mine.body or rec.villain.body
+	local foeBody = who == "player" and rec.villain.body or rec.mine.body
+	local t = def.Tuning
+	local toFoe = Vector3.new(foeBody.Position.X - selfBody.Position.X, 0, foeBody.Position.Z - selfBody.Position.Z)
+	local dir = toFoe.Magnitude > 0.1 and toFoe.Unit or Vector3.new(0, 0, -1)
+	local ev = { kind = "special", who = who, id = def.Id, special = def.Kind, spirit = rec.spirits[who], at = selfBody.Position, dir = dir }
+	if def.Kind == "dash" then
+		ev.dash = t.DashSpeed
+		if who == "villain" then
+			selfBody.AssemblyLinearVelocity = Vector3.new(dir.X * t.DashSpeed, selfBody.AssemblyLinearVelocity.Y, dir.Z * t.DashSpeed)
+		end
+	end
+	if (def.Kind == "heal" or def.Kind == "guard") and t.Heal then
+		ev.healed = BattleCore.heal(b, who, b.sides[who].maxSpin * t.Heal)
+	end
+	if def.Kind == "quake" then
+		local dist = toFoe.Magnitude
+		if dist <= t.Radius then
+			local out = SpecialsCore.outgoing(side, now, A, false)
+			local inc, kbIn = SpecialsCore.incoming(rec.specials[foeKey], now, A)
+			local falloff = 1 - 0.4 * (dist / t.Radius)
+			local dmg = t.Damage * falloff * out * inc * (who == "villain" and rec.diff.Damage or 1)
+			local applied = BattleCore.damage(b, foeKey, dmg)
+			ev.hit, ev.dealt = true, applied
+			SpecialsCore.charge(side, applied * A.MeterPerDamageDealt, A)
+			SpecialsCore.charge(rec.specials[foeKey], applied * A.MeterPerDamageTaken, A)
+			local push = (dir + Vector3.new(0, 0.5, 0)).Unit * t.Knockback * kbIn
+			if foeKey == "villain" then
+				rec.villain.body.AssemblyLinearVelocity += push
+				rec.ai:onHit(now)
+			else
+				remotes.Knockback:FireClient(rec.player, push)
+			end
+		end
+	end
+	send(rec.player, ev)
+	return true
+end
+
+local function awaken(rec, who, now)
+	if rec.battle.state ~= "active" or not SpecialsCore.awaken(rec.specials[who], now, A) then
+		return false
+	end
+	local body = who == "player" and rec.mine.body or rec.villain.body
+	send(rec.player, { kind = "awaken", who = who, spirit = rec.spirits[who], at = body.Position, duration = A.AwakenDuration })
+	return true
+end
+
+local function sendSnapshot(rec, now)
+	if now - rec.snapshotAt < SNAPSHOT_EVERY then
+		return
+	end
+	rec.snapshotAt = now
+	local you = SpecialsCore.snapshot(rec.specials.player, now, A)
+	you.speed = SpecialsCore.speed(rec.specials.player, now, A)
+	send(rec.player, { kind = "specials", you = you, foe = SpecialsCore.snapshot(rec.specials.villain, now, A) })
 end
 
 local function step(dt)
@@ -319,6 +435,8 @@ local function step(dt)
 				rec.villain.body.AssemblyLinearVelocity = toPlayer.Unit * ve.speed
 			end
 			rec.ai:launched(ve.boost, now)
+			SpecialsCore.start(rec.specials.player, now, A)
+			SpecialsCore.start(rec.specials.villain, now, A)
 			local pe = LaunchCore.effects(pl.quality, L)
 			setBattleAttrs(player, "active", Workspace:GetServerTimeNow() + B.Duration)
 			send(player, {
@@ -346,11 +464,27 @@ local function step(dt)
 		if CombatCore.ringOutStep(rec.outTimers, "villain", rec.villain.body.Position - center, now, B) then
 			BattleCore.ringOut(b, "villain")
 		end
+		SpecialsCore.tick(rec.specials.player, dt, A)
+		SpecialsCore.tick(rec.specials.villain, dt, A)
 		resolveContact(rec, now)
 		local mine = rec.mine.body
+		rec.ai.speedMul = SpecialsCore.speed(rec.specials.villain, now, A)
 		rec.ai:step(dt, now, { pos = mine.Position, vel = mine.AssemblyLinearVelocity }, BattleCore.fraction(b, "villain"), function(fall)
 			villainSlam(rec, fall, now)
 		end)
+		-- the villain's specials and awakening
+		local choice = rec.ai:chooseSpecial(now, {
+			specials = rec.specials.villain,
+			foe = rec.specials.player,
+			canAwaken = SpecialsCore.canAwaken(rec.specials.villain, A),
+			spin = BattleCore.fraction(b, "villain"),
+		})
+		if choice == "awaken" then
+			awaken(rec, "villain", now)
+		elseif choice then
+			useSpecial(rec, "villain", choice, now)
+		end
+		sendSnapshot(rec, now)
 		-- a knockout this frame is resolved on the next update()
 	elseif rec.ai then
 		rec.ai:idle(dt)
@@ -415,6 +549,12 @@ function BattleService.start(r)
 			rec.launch.player = { quality = q, label = label }
 			BattleCore.setStartSpin(rec.battle, "player", LaunchCore.effects(q, L).spinFraction)
 			send(player, { kind = "launchLocked", label = label, quality = q })
+		elseif req.action == "special" and mine and (req.index == 1 or req.index == 2) then
+			if not useSpecial(rec, "player", req.index, os.clock()) then
+				send(player, { kind = "specialRefused", index = req.index })
+			end
+		elseif req.action == "awaken" and mine then
+			awaken(rec, "player", os.clock())
 		elseif req.action == "rematch" and mine and rec.battle.state == "finished" then
 			BattleCore.requestCleanup(rec.battle, os.clock())
 			cleanup(rec, true)

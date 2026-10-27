@@ -115,6 +115,66 @@ end
 -- What a player owns at the start: all Common.
 BeyConfig.StarterBey = { Layer = "layer_cinderlash", Disc = "disc_pebbledisc", Driver = "driver_flatnub" }
 
+-- Spirits and special moves are equipped next to the three parts (the "loadout"). What they do in battle is in
+-- Core/SpecialsCore.lua; the numbers are here. Every name and creature is ORIGINAL.
+--   Spirit   the creature that appears when you use a special or awaken. Passive: small always-on multipliers.
+--   Special  two slots (keys 1 and 2). Kinds: dash (burst forward; your next hit hits harder), guard (take less
+--            damage and knockback for a while), heal (get spin back), quake (shockwave around you).
+local SPIRIT_ROWS = {
+	-- id, name, rarity, colour, passive multipliers
+	{ "spirit_emberwolf", "Ember Wolf", "Common", Color3.fromRGB(255, 122, 46), { Attack = 1.04 } },
+	{ "spirit_tidedrake", "Tide Drake", "Uncommon", Color3.fromRGB(79, 227, 255), { Defense = 1.06 } },
+	{ "spirit_thornstag", "Thorn Stag", "Rare", Color3.fromRGB(140, 255, 106), { Defense = 1.03, Drain = 0.92 } },
+	{ "spirit_stormroc", "Storm Roc", "Epic", Color3.fromRGB(111, 155, 255), { Attack = 1.04, Speed = 1.06 } },
+	{ "spirit_sunmane", "Sunmane Lion", "Legendary", Color3.fromRGB(255, 201, 64), { Attack = 1.07, Defense = 1.05 } },
+}
+local SPECIAL_ROWS = {
+	-- id, name, rarity, colour, kind, tuning (Cooldown seconds; see SpecialsCore for each field)
+	{ "special_cometdrive", "Comet Drive", "Common", Color3.fromRGB(255, 150, 60), "dash", { Cooldown = 9, DashSpeed = 95, Window = 1.6, DamageMul = 1.8, KnockbackMul = 1.6 } },
+	{ "special_ironshell", "Iron Shell", "Common", Color3.fromRGB(140, 190, 255), "guard", { Cooldown = 14, Duration = 3.5, Block = 0.5, KnockbackBlock = 0.6 } },
+	{ "special_secondspin", "Second Spin", "Uncommon", Color3.fromRGB(110, 255, 150), "heal", { Cooldown = 22, Heal = 0.14 } },
+	{ "special_quakestomp", "Quake Stomp", "Rare", Color3.fromRGB(255, 196, 70), "quake", { Cooldown = 12, Radius = 14, Damage = 9, Knockback = 60 } },
+	{ "special_starbreaker", "Starbreaker Rush", "Epic", Color3.fromRGB(190, 110, 255), "dash", { Cooldown = 11, DashSpeed = 115, Window = 1.8, DamageMul = 2.2, KnockbackMul = 1.9 } },
+	{ "special_aegisbloom", "Aegis Bloom", "Legendary", Color3.fromRGB(255, 120, 200), "guard", { Cooldown = 16, Duration = 4.5, Block = 0.65, KnockbackBlock = 0.8, Heal = 0.05 } },
+}
+
+BeyConfig.Spirits = {} -- id -> { Id, Name, Slot = "Spirit", Rarity, Color, Passive }
+BeyConfig.Specials = {} -- id -> { Id, Name, Slot = "Special", Rarity, Color, Kind, Tuning }
+for _, row in ipairs(SPIRIT_ROWS) do
+	BeyConfig.Spirits[row[1]] = { Id = row[1], Name = row[2], Slot = "Spirit", Rarity = row[3], Color = row[4], Passive = row[5] }
+end
+for _, row in ipairs(SPECIAL_ROWS) do
+	BeyConfig.Specials[row[1]] = { Id = row[1], Name = row[2], Slot = "Special", Rarity = row[3], Color = row[4], Kind = row[5], Tuning = row[6] }
+end
+
+-- Everything a player can own, by id (parts, spirits, specials). Each row has .Slot (its kind of slot).
+BeyConfig.Items = {}
+for _, list in ipairs({ BeyConfig.Parts, BeyConfig.Spirits, BeyConfig.Specials }) do
+	for id, item in pairs(list) do
+		assert(BeyConfig.Items[id] == nil, "duplicate item id " .. id)
+		BeyConfig.Items[id] = item
+	end
+end
+
+-- The loadout: equipped slot -> the kind of item it holds. Special1 and Special2 both hold specials (never the same one).
+BeyConfig.LoadoutSlots = { "Layer", "Disc", "Driver", "Spirit", "Special1", "Special2" }
+function BeyConfig.SlotKind(slot)
+	if slot == "Special1" or slot == "Special2" then
+		return "Special"
+	end
+	return slot
+end
+
+-- What a new player owns and has equipped.
+BeyConfig.StarterLoadout = {
+	Layer = BeyConfig.StarterBey.Layer,
+	Disc = BeyConfig.StarterBey.Disc,
+	Driver = BeyConfig.StarterBey.Driver,
+	Spirit = "spirit_emberwolf",
+	Special1 = "special_cometdrive",
+	Special2 = "special_ironshell",
+}
+
 -- A bey at level 1 has half its parts' strength; MaxLevel reaches the full value (grind cap).
 function BeyConfig.LevelMultiplier(level)
 	level = math.clamp(level, 1, BeyConfig.MaxLevel)
@@ -237,6 +297,26 @@ local function validate()
 		if part.Rarity == "UltraLegendary" then
 			assert(total <= top[part.Slot] * BeyConfig.UltraMultiplier + 0.5, part.Id .. ": Ultra Legendary is over +10%")
 			assert(total > top[part.Slot], part.Id .. ": Ultra Legendary is not stronger than Legendary")
+		end
+	end
+	for slot, id in pairs(BeyConfig.StarterLoadout) do
+		local item = BeyConfig.Items[id]
+		assert(item and item.Slot == BeyConfig.SlotKind(slot), "starter loadout: bad " .. slot)
+	end
+	assert(BeyConfig.StarterLoadout.Special1 ~= BeyConfig.StarterLoadout.Special2, "starter specials must differ")
+	for id, sp in pairs(BeyConfig.Specials) do
+		local t = sp.Tuning
+		assert(type(t.Cooldown) == "number" and t.Cooldown > 0, id .. ": no cooldown")
+		if sp.Kind == "dash" then
+			assert(t.DashSpeed and t.Window and t.DamageMul and t.KnockbackMul, id .. ": dash tuning")
+		elseif sp.Kind == "guard" then
+			assert(t.Duration and t.Block and t.KnockbackBlock and t.Block < 1, id .. ": guard tuning")
+		elseif sp.Kind == "heal" then
+			assert(t.Heal and t.Heal > 0 and t.Heal < 1, id .. ": heal tuning")
+		elseif sp.Kind == "quake" then
+			assert(t.Radius and t.Damage and t.Knockback, id .. ": quake tuning")
+		else
+			error(id .. ": unknown special kind " .. tostring(sp.Kind))
 		end
 	end
 	for boxId, box in pairs(BeyConfig.Boxes) do

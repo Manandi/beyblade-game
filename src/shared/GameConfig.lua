@@ -75,6 +75,20 @@ GameConfig.Launch = {
 	BoostTime = 4, -- ... fading to nothing over this many seconds
 }
 
+-- Specials and Awakening in battle (per-special numbers live in BeyConfig.Specials; see Core/SpecialsCore.lua).
+GameConfig.Specials = {
+	FirstUseDelay = 2.5, -- seconds after LET IT RIP before specials can be used
+	-- Awakening: a meter that fills during the battle; when full, press R to awaken your spirit (once per battle).
+	MeterMax = 100,
+	MeterPerSecond = 1.0, -- passive fill
+	MeterPerDamageDealt = 2.4, -- per point of spin you knock off the foe
+	MeterPerDamageTaken = 1.6, -- per point you lose to hits (comebacks)
+	AwakenDuration = 10,
+	AwakenAttack = 1.25, -- damage dealt x
+	AwakenDefense = 1.25, -- damage and knockback taken / this
+	AwakenSpeed = 1.1, -- top speed x
+}
+
 GameConfig.Difficulty = {
 	-- Speed: villain top-speed multiplier. Windup: seconds of warning before an attack. Aggression: 0..1 how often it
 	-- attacks when in range. Damage: multiplier on its hits. Reward: multiplier on rewards for beating it.
@@ -88,6 +102,8 @@ GameConfig.Villain = {
 	Id = "rook",
 	Name = "Rook the Grinder",
 	Parts = { Layer = "layer_skyrend", Disc = "disc_bulwarkring", Driver = "driver_spikegrip" }, -- all Uncommon
+	Spirit = "spirit_thornstag",
+	Specials = { "special_cometdrive", "special_quakestomp" },
 	Level = 3,
 	Difficulty = "Normal",
 	-- After this many wins against it, the next rematch uses Hard (shown to the player).
