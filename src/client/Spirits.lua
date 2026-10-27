@@ -336,6 +336,26 @@ function Spirits:_sigil(ground, color)
 	return parts
 end
 
+-- A solid-coloured creature for menu cards (ViewportFrames don't show ForceField well). Height ~2 studs, feet at 0.
+function Spirits.preview(id)
+	local def = BeyConfig.Spirits[id]
+	if not def then
+		return nil
+	end
+	local model, size = buildCreature(id, def.Color)
+	for _, p in ipairs(model:GetDescendants()) do
+		if p:IsA("BasePart") and p.Name ~= "Pivot" then
+			local base = p:GetAttribute("BaseTransparency") or 0
+			p.Material = Enum.Material.SmoothPlastic
+			p.Transparency = base > 0.5 and 1 or 0
+		end
+	end
+	pcall(function()
+		model:ScaleTo(2 / math.max(size.Y, 0.01))
+	end)
+	return model
+end
+
 function Spirits:clear()
 	while #self.active > 0 do
 		self:_retire(self.active[1])

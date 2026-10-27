@@ -464,7 +464,11 @@ T.test("client: the Workshop opens from the kiosk and equips through the UI", fu
 	local hud = alice.PlayerGui.SpinforgeHud
 	local window = hud:FindFirstChild("Workshop")
 	T.ok(window and window.Visible, "workshop visible")
-	local equip = findButton(window, "Equip") -- the starter layer is owned and not equipped now
+	local card = window:FindFirstChild("layer_cinderlash", true) -- the starter layer: owned, not equipped now
+	T.ok(card, "a card per part")
+	card.Activated:Fire()
+	Mock.advance(0.1)
+	local equip = findButton(window, "Equip")
 	T.ok(equip, "an Equip button")
 	equip.Activated:Fire()
 	Mock.advance(0.1)
@@ -474,6 +478,30 @@ T.test("client: the Workshop opens from the kiosk and equips through the UI", fu
 	Mock.advance(0.1)
 	T.ok(not window.Visible, "closed")
 	noErrors("workshop ui")
+end)
+
+T.test("client: loadout specials tab equips into slot 1 / slot 2 (swapping)", function()
+	prompt("WorkshopPrompt").Triggered:Fire(alice)
+	Mock.advance(0.1)
+	local window = alice.PlayerGui.SpinforgeHud:FindFirstChild("Workshop")
+	findButton(window, "SPECIALS").Activated:Fire()
+	Mock.advance(0.1)
+	T.ok(window:FindFirstChild("special_quakestomp", true), "unowned specials are listed too")
+	local before = lastProfile(alice).Equipped
+	local card = window:FindFirstChild(before.Special2, true)
+	card.Activated:Fire()
+	Mock.advance(0.1)
+	findButton(window, "Equip to slot 1").Activated:Fire()
+	Mock.advance(0.1)
+	local after = lastProfile(alice).Equipped
+	T.eq(after.Special1, before.Special2, "moved to slot 1")
+	T.eq(after.Special2, before.Special1, "and swapped")
+	findButton(window, "SPIRITS").Activated:Fire()
+	Mock.advance(0.1)
+	T.ok(window:FindFirstChild("spirit_sunmane", true), "spirit cards")
+	findButton(window, "X").Activated:Fire()
+	Mock.advance(0.1)
+	noErrors("loadout specials")
 end)
 
 T.test("client: settings toggles are saved on the server", function()

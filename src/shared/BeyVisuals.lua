@@ -276,4 +276,45 @@ function BeyVisuals.Attach(hub, root, partIds, parent)
 	buildRarityEffects(ctx, layer, best, layerMeshed)
 end
 
+-- For menus (ViewportFrames): a Model of one part (id) or a whole bey (partIds table), centred on the origin,
+-- anchored, no physics. Cosmetic only; the client calls this.
+function BeyVisuals.Preview(what)
+	local model = Instance.new("Model")
+	local hub = Instance.new("Part")
+	hub.Name = "Hub"
+	hub.Anchored = true
+	hub.Transparency = 1
+	hub.CanCollide = false
+	hub.Size = Vector3.new(0.2, 0.2, 0.2)
+	hub.CFrame = CFrame.new()
+	hub.Parent = model
+	model.PrimaryPart = hub
+	if type(what) == "table" then
+		BeyVisuals.Attach(hub, CFrame.new(), what, model)
+	else
+		local part = BeyConfig.Parts[what]
+		local design = BeyDesigns.Parts[what]
+		if part and design then
+			local ctx = { hub = hub, root = CFrame.new(), parent = model }
+			if not tryMeshes(ctx, what, part.Slot, design, 0) then
+				if part.Slot == "Layer" then
+					buildLayer(ctx, design)
+				elseif part.Slot == "Disc" then
+					buildDisc(ctx, design)
+				else
+					buildDriver(ctx, design)
+				end
+			end
+		end
+	end
+	for _, d in ipairs(model:GetDescendants()) do
+		if d:IsA("BasePart") then
+			d.Anchored = true
+		elseif d:IsA("WeldConstraint") or d:IsA("ParticleEmitter") then
+			d:Destroy()
+		end
+	end
+	return model
+end
+
 return BeyVisuals
